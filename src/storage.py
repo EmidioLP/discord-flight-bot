@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS price_checks (
     inbound_duration_minutes  INTEGER,
     inbound_stops             INTEGER,
 
+    provider                  TEXT,
+    provider_is_direct        INTEGER,
+    booking_url               TEXT,
+    seats_remaining           INTEGER,
+    total_options             INTEGER,
+
     fare_valid_until          TEXT,
     raw_response              TEXT    NOT NULL
 );
@@ -226,9 +232,32 @@ def connect(
     return conn
 
 
+# Colunas acrescentadas depois que o banco ja existia em producao. CREATE TABLE
+# IF NOT EXISTS nao altera tabela existente, entao cada uma entra via ALTER.
+_COLUNAS_NOVAS = (
+    ("provider", "TEXT"),
+    ("provider_is_direct", "INTEGER"),
+    ("booking_url", "TEXT"),
+    ("seats_remaining", "INTEGER"),
+    ("total_options", "INTEGER"),
+)
+
+
+def _migrar(conn: Any) -> None:
+    """Acrescenta colunas que faltam num banco criado por uma versao anterior."""
+    for coluna, tipo in _COLUNAS_NOVAS:
+        try:
+            conn.execute(f"ALTER TABLE price_checks ADD COLUMN {coluna} {tipo}")
+            logger.info("Coluna %s adicionada a price_checks", coluna)
+        except Exception:  # noqa: BLE001 - "duplicate column" varia entre sqlite3 e libSQL
+            pass
+    conn.commit()
+
+
 def init_db(conn: Any) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrar(conn)
 
 
 @contextmanager
@@ -256,8 +285,10 @@ def save_offer(conn: DBConnection, offer: Offer) -> int:
             outbound_duration_minutes, outbound_stops,
             inbound_departure, inbound_arrival,
             inbound_duration_minutes, inbound_stops,
+            provider, provider_is_direct, booking_url,
+            seats_remaining, total_options,
             fare_valid_until, raw_response
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             offer.checked_at,
@@ -272,6 +303,11 @@ def save_offer(conn: DBConnection, offer: Offer) -> int:
             inbound.arrival if inbound else None,
             inbound.duration_minutes if inbound else None,
             inbound.stops if inbound else None,
+            offer.provider,
+            None if offer.provider_is_direct is None else int(offer.provider_is_direct),
+            offer.booking_url,
+            offer.seats_remaining,
+            offer.total_options,
             offer.fare_valid_until,
             json.dumps(offer.raw_response, ensure_ascii=False),
         ),

@@ -1,13 +1,16 @@
 # Discord Flight Bot
 
-Monitor de precos de voos **BEL -> NAT** (ida 27/12/2026, volta 05/01/2027) na
-LATAM e na Azul, com notificacao por webhook do Discord a cada checagem.
+Monitor de precos de voos **BEL -> NAT** (ida 27/12/2026, volta 05/01/2027),
+com notificacao por webhook do Discord a cada checagem.
 
-Os dados vem da [GeckoAPI](https://geckoapi.com.br) (`POST /v1/extract`), que
-cobra **5 creditos por request**. O plano free da 100 creditos/mes, entao o bot
-roda **a cada 4 dias** (no maximo 8 checagens x 10 creditos = 80, com 20 de
-folga para retries) e tem um contador de creditos que impede o estouro mesmo se
-o scheduler disparar fora de hora.
+A busca e feita no **KAYAK** via [GeckoAPI](https://geckoapi.com.br)
+(`POST /v1/extract`, target `kayak.com.br:plp`), **sem filtrar companhia**: a
+metabusca cobre todas as companhias e agencias, e a mensagem informa de qual
+companhia e a viagem mais barata encontrada e quem a vende.
+
+Cada request custa **5 creditos** e o plano free da 100/mes, entao o bot roda
+**a cada 2 dias** (no maximo 16 checagens x 5 = 80 creditos) e tem um contador
+que impede o estouro mesmo se o scheduler disparar fora de hora.
 
 ---
 
@@ -58,13 +61,13 @@ Envia um embed de exemplo ao Discord para validar o webhook. **Nao gasta credito
 python -m src.main once
 ```
 
-Executa uma checagem completa (LATAM + Azul). **Gasta 10 creditos.**
+Executa uma checagem. **Gasta 5 creditos.**
 
 ```bash
 python -m src.main schedule
 ```
 
-Deixa o processo rodando e checa a cada 4 dias via APScheduler. Roda uma vez
+Deixa o processo rodando e checa a cada 2 dias via APScheduler. Roda uma vez
 imediatamente ao subir e depois respeita o intervalo.
 
 ---
@@ -117,9 +120,9 @@ Em **Settings > Secrets and variables > Actions**, crie os quatro:
 
 ### 4. Testar
 
-Aba **Actions > Checagem de precos > Run workflow**. Gasta 10 creditos e deve
-resultar em dois embeds no Discord. A partir dai o cron assume: dias 1, 5, 9,
-13, 17, 21, 25 e 29, as 9h de Belem.
+Aba **Actions > Checagem de precos > Run workflow**. Gasta 5 creditos e deve
+resultar em um embed no Discord. A partir dai o cron assume: dias impares, as
+9h de Belem.
 
 ### Detalhes do workflow
 
@@ -131,7 +134,7 @@ resultar em dois embeds no Discord. A partir dai o cron assume: dias 1, 5, 9,
   vivo e ainda deixa um rastro legivel. Roda com `if: always()`, para manter o
   agendamento vivo mesmo quando a checagem falha.
 - **Cron do GitHub nao e pontual**: sob carga o disparo atrasa alguns minutos.
-  Irrelevante para monitorar passagem a cada 4 dias.
+  Irrelevante para monitorar passagem a cada 2 dias.
 - **`tests.yml`** roda a suite a cada push. Codigo quebrado que so falhasse na
   proxima checagem agendada custaria creditos.
 
@@ -152,10 +155,10 @@ Se preferir rodar na sua propria maquina em vez do GitHub Actions:
 
 O modo `schedule` exige um processo vivo. Para agendar pelo sistema:
 
-**Windows (Agendador de Tarefas)** — a cada 4 dias, as 9h:
+**Windows (Agendador de Tarefas)** — a cada 2 dias, as 9h:
 
 ```powershell
-$a = New-ScheduledTaskAction -Execute "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot\.venv\Scripts\python.exe" -Argument "-m src.main once" -WorkingDirectory "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot"; $t = New-ScheduledTaskTrigger -Daily -DaysInterval 4 -At 9am; $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun; Register-ScheduledTask -TaskName "MonitorVoos" -Action $a -Trigger $t -Settings $s
+$a = New-ScheduledTaskAction -Execute "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot\.venv\Scripts\python.exe" -Argument "-m src.main once" -WorkingDirectory "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot"; $t = New-ScheduledTaskTrigger -Daily -DaysInterval 2 -At 9am; $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun; Register-ScheduledTask -TaskName "MonitorVoos" -Action $a -Trigger $t -Settings $s
 ```
 
 `-WorkingDirectory` importa: `python -m src.main` so funciona a partir da raiz
@@ -163,10 +166,10 @@ do projeto. `-StartWhenAvailable` recupera disparo perdido com o PC desligado e
 `-WakeToRun` acorda a maquina suspensa — o contador de creditos protege contra
 o acumulo de disparos atrasados.
 
-**Linux/macOS (cron)** — dias 1, 5, 9, 13, 17, 21, 25 e 29 as 9h:
+**Linux/macOS (cron)** — dias impares as 9h:
 
 ```bash
-0 9 */4 * * cd /caminho/discord-flight-bot && .venv/bin/python -m src.main once >> data/cron.log 2>&1
+0 9 */2 * * cd /caminho/discord-flight-bot && .venv/bin/python -m src.main once >> data/cron.log 2>&1
 ```
 
 Em qualquer um dos dois, o contador de creditos continua valendo: se o
@@ -194,11 +197,11 @@ mockada e payloads que seguem o schema documentado da GeckoAPI.
 
 ```
 main.py
-  |- credits_tracker.ensure_budget(10)      # aborta se nao couber no mes
-  |- fetch_prices.fetch_latam/fetch_azul    # 5 creditos cada, com retry
-  |- compare.compare_with_history           # MIN(price) ANTES de salvar
+  |- credits_tracker.ensure_budget(5)       # aborta se nao couber no mes
+  |- fetch_prices.fetch_kayak               # 1 request, todas as companhias
+  |- compare.compare_with_history           # MIN(price) global, ANTES de salvar
   |- storage.save_offer                     # inclui o JSON bruto
-  `- discord_bot.notify_offer               # 1 embed: a companhia mais barata
+  `- discord_bot.notify_offer               # 1 embed: a viagem mais barata
 ```
 
 Decisoes que valem registro:
@@ -212,13 +215,20 @@ Decisoes que valem registro:
   cobrou. Erro de conexao (request nao chegou a sair) nao debita.
 - **O ledger de creditos e chaveado por `YYYY-MM`.** O "reset todo dia 1"
   acontece sozinho na virada do mes, sem rotina de limpeza.
-- **Uma checagem = uma mensagem.** As duas companhias sao consultadas e
-  salvas, mas so a mais barata vira embed, com o preco da outra num campo de
-  comparacao. Se uma falhar, vira uma nota dentro do mesmo embed em vez de uma
-  segunda mensagem.
-- **Duracao tem fallback pelos horarios.** A Azul manda `duration` num formato
-  que nem sempre da para interpretar; quando nao da, a duracao e calculada
-  subtraindo saida de chegada.
+- **Metabusca em vez de consultar cada companhia.** Uma request ao KAYAK cobre
+  todas as companhias e custa metade de LATAM+Azul separados. E o schema dele
+  entrega estruturado o que antes eu adivinhava: `legs[]` ja separa ida e volta,
+  `durationMinutes` e numero, `price.amount` e o total da viagem.
+- **A busca nao filtra companhia.** Filtrar esconderia a oferta mais barata; a
+  companhia vem na resposta (`segments[].airlineName`) e vai para o embed.
+- **Ofertas de agencia entram, marcadas.** `bookingOptions[].isDirect` distingue
+  venda direta de agencia (123Milhas, Decolar), e o embed diz qual e qual.
+- **O minimo historico e global.** Como a companhia varia a cada checagem,
+  comparar so contra o historico da companhia sorteada esconderia o preco real.
+- **`seatsRemaining` no lugar da validade da tarifa.** Nenhum target da GeckoAPI
+  expoe validade; assentos restantes e o dado de urgencia mais proximo.
+- **Duracao tem fallback pelos horarios.** Quando `durationMinutes` vem null, a
+  duracao e calculada subtraindo saida de chegada.
 - **HTTP 5xx gera estorno no ledger.** A GeckoAPI devolve o credito de
   extracoes que ela nao concluiu, e sem lancar o estorno o contador subiria
   sozinho e barraria checagens que ainda cabiam.

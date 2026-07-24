@@ -51,20 +51,37 @@ class Leg:
 
 @dataclass(frozen=True)
 class Offer:
-    """A oferta mais barata encontrada para uma companhia numa checagem."""
+    """A viagem mais barata encontrada numa checagem."""
 
-    airline: str
+    airline: str  # descoberto na resposta, nao filtrado na busca
     price: float
     currency: str
     outbound: Leg | None
     inbound: Leg | None
-    # As duas APIs da GeckoAPI nao expoem validade de tarifa; fica None ate que
-    # exponham. Ver secao "Validade da tarifa" no README.
+    # Quem vende: a propria companhia ou uma agencia (123Milhas, Decolar...).
+    provider: str | None = None
+    provider_is_direct: bool | None = None
+    booking_url: str | None = None
+    # Assentos restantes no trecho mais apertado. Nenhum target da GeckoAPI
+    # expoe validade de tarifa; este e o dado de urgencia mais proximo.
+    seats_remaining: int | None = None
+    total_options: int | None = None
     fare_valid_until: str | None = None
     raw_response: dict[str, Any] = field(default_factory=dict, repr=False)
     checked_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
+
+    @property
+    def provider_label(self) -> str:
+        """Texto pronto sobre o vendedor, para o embed."""
+        if not self.provider:
+            return "vendedor nao informado"
+        if self.provider_is_direct is True:
+            return f"{self.provider} (venda direta)"
+        if self.provider_is_direct is False:
+            return f"{self.provider} (agencia)"
+        return self.provider
 
     @property
     def total_duration_minutes(self) -> int | None:

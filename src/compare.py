@@ -1,8 +1,7 @@
-"""Comparacao do preco atual com o historico da companhia.
+"""Comparacao do preco atual com o historico.
 
 O menor preco historico nao e guardado em coluna: e sempre derivado com
-MIN(price) filtrando por companhia, para nao existir estado duplicado que
-possa dessincronizar.
+MIN(price), para nao existir estado duplicado que possa dessincronizar.
 
 A logica pura (`build_comparison`) e separada do acesso ao banco
 (`historical_low`, `last_price`) justamente para ser testavel sem SQLite.
@@ -65,7 +64,7 @@ class Comparison:
     def summary(self, currency: str = "BRL") -> str:
         """Frase pronta para o embed do Discord."""
         if self.is_first_check:
-            return "Primeira checagem desta companhia - virou a referencia."
+            return "Primeira checagem registrada - virou a referencia."
         low = format_money(self.historical_low, currency)
         if self.is_new_low:
             return (
@@ -95,42 +94,60 @@ def build_comparison(
     )
 
 
-def historical_low(conn: DBConnection, airline: str) -> float | None:
-    """Menor preco ja registrado para a companhia, ou None se nao houver."""
-    row = conn.execute(
-        "SELECT MIN(price) AS low FROM price_checks WHERE airline = ?", (airline,)
-    ).fetchone()
+def historical_low(conn: DBConnection, airline: str | None = None) -> float | None:
+    """Menor preco ja registrado, ou None se nao houver.
+
+    Sem `airline`, o minimo e global - que e o que interessa desde a mudanca
+    para o KAYAK: a busca nao fixa companhia, entao comparar so contra o
+    historico da companhia sorteada nesta checagem esconderia o preco real.
+    Com `airline`, filtra (usado em relatorios).
+    """
+    if airline is None:
+        row = conn.execute("SELECT MIN(price) AS low FROM price_checks").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MIN(price) AS low FROM price_checks WHERE airline = ?", (airline,)
+        ).fetchone()
     low = row["low"] if row is not None else None
     return float(low) if low is not None else None
 
 
-def last_price(conn: DBConnection, airline: str) -> float | None:
-    """Preco da checagem anterior mais recente da companhia."""
-    row = conn.execute(
-        """
-        SELECT price FROM price_checks
-        WHERE airline = ?
-        ORDER BY checked_at DESC, id DESC
-        LIMIT 1
-        """,
-        (airline,),
-    ).fetchone()
+def last_price(conn: DBConnection, airline: str | None = None) -> float | None:
+    """Preco da checagem anterior mais recente."""
+    if airline is None:
+        row = conn.execute(
+            "SELECT price FROM price_checks ORDER BY checked_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT price FROM price_checks
+            WHERE airline = ?
+            ORDER BY checked_at DESC, id DESC
+            LIMIT 1
+            """,
+            (airline,),
+        ).fetchone()
     return float(row["price"]) if row is not None else None
 
 
 def compare_with_history(
-    conn: DBConnection, airline: str, current_price: float
+    conn: DBConnection, airline: str, current_price: float, global_history: bool = True
 ) -> Comparison:
     """Compara o preco atual contra o historico ja gravado.
 
     Deve ser chamado ANTES de salvar a checagem atual, senao o proprio preco
     entra no MIN() e a comparacao sempre empata.
+
+    `global_history=True` compara contra todas as checagens, independente da
+    companhia; `airline` continua sendo gravado para identificar a oferta.
     """
+    filtro = None if global_history else airline
     comparison = build_comparison(
         airline=airline,
         current_price=current_price,
-        historical_low=historical_low(conn, airline),
-        previous_price=last_price(conn, airline),
+        historical_low=historical_low(conn, filtro),
+        previous_price=last_price(conn, filtro),
     )
     logger.info(
         "Comparacao | %s | atual=%.2f | minimo=%s | novo minimo=%s",

@@ -1,18 +1,26 @@
-"""Cliente da GeckoAPI e parsers de LATAM e Azul.
+"""Cliente da GeckoAPI e parser do KAYAK.
 
 Endpoint unico: POST https://api.geckoapi.com.br/v1/extract
 Auth: header Authorization: Bearer <chave>
 Custo: 5 creditos por request.
 
-Os dois targets devolvem formatos bem diferentes (confirmado na doc oficial em
-https://geckoapi.com.br/docs):
+Fonte: `kayak.com.br` + `type=plp` (schema em https://geckoapi.com.br/docs).
 
-  latamairlines.com + type=plp -> data.items[]  (lista plana de opcoes)
-  voeazul.com.br    + type=plp -> data.trips[].journeys[]  (aninhado por trecho)
+Por que metabusca em vez de consultar cada companhia: uma request cobre todas
+as companhias e agencias, custa metade de LATAM+Azul separados, e o schema ja
+entrega estruturado o que antes eu tinha que adivinhar:
 
-Por isso cada um tem seu proprio parser, normalizando para models.Offer.
-Todo campo e lido de forma defensiva: a doc avisa que "alguns campos podem
-retornar null em producao", e a resposta bruta e sempre salva no banco.
+  * `items[].legs[]`            -> ida e volta no mesmo item, sem separar por
+                                   aeroporto de origem
+  * `legs[].durationMinutes`    -> numero, sem adivinhar formato de string
+  * `items[].price.amount`      -> preco total da viagem, sem somar trechos
+  * `items[].isCheapest`        -> o proprio KAYAK marca a mais barata
+  * `segments[].airlineName`    -> nome da companhia pronto
+  * `bookingOptions[]`          -> quem vende (companhia ou agencia)
+  * `segments[].seatsRemaining` -> assentos restantes
+
+A doc nao expoe validade de tarifa em nenhum target; `seatsRemaining` e o dado
+de urgencia mais proximo disso.
 """
 
 from __future__ import annotations
@@ -21,19 +29,18 @@ import logging
 import re
 import time
 from datetime import datetime
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 import requests
 
-from .config import AZUL, LATAM, Settings
+from .config import Settings
 from .models import Leg, Offer
 
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api.geckoapi.com.br/v1/extract"
 
-TARGET_LATAM = "latamairlines.com"
-TARGET_AZUL = "voeazul.com.br"
+TARGET_KAYAK = "kayak.com.br"
 EXTRACT_TYPE = "plp"
 
 
@@ -80,14 +87,11 @@ _CLOCK_DURATION = re.compile(r"^(?P<hours>\d{1,3}):(?P<minutes>\d{2})(?::(?P<sec
 def parse_duration_to_minutes(value: Any) -> int | None:
     """Normaliza duracao para minutos.
 
-    A LATAM manda `durationMinutes` (numero) e a Azul manda `duration` (string).
-    A doc da Azul nao fixa o formato da string, entao aceitamos os tres que
-    aparecem na pratica: ISO-8601 (PT2H10M), relogio (02:10 / 02:10:00) e
-    numero puro.
+    O KAYAK manda `durationMinutes` numerico, mas o campo pode vir null; os
+    formatos de string ficam aceitos porque custam pouco e ja nos salvaram uma
+    vez quando a Azul mandou um formato nao documentado.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         return int(value)
@@ -97,7 +101,6 @@ def parse_duration_to_minutes(value: Any) -> int | None:
     text = value.strip().upper()
     if not text:
         return None
-
     if text.isdigit():
         return int(text)
 
@@ -123,9 +126,8 @@ def parse_duration_to_minutes(value: Any) -> int | None:
 def duration_from_timestamps(departure: Any, arrival: Any) -> int | None:
     """Calcula a duracao em minutos a partir da saida e da chegada.
 
-    Rede de seguranca para quando a API manda a duracao num formato que
-    `parse_duration_to_minutes` nao reconhece: os horarios ja estao ali, e a
-    subtracao deles e mais confiavel do que adivinhar mais um formato.
+    Rede de seguranca para quando `durationMinutes` vem null: os horarios ja
+    estao ali, e a subtracao e mais confiavel do que deixar o campo vazio.
     """
     if not departure or not arrival:
         return None
@@ -143,7 +145,7 @@ def duration_from_timestamps(departure: Any, arrival: Any) -> int | None:
 
     minutos = int((fim - inicio).total_seconds() // 60)
     if minutos <= 0:
-        logger.warning("Duracao calculada nao positiva (%s min): %r -> %r", minutos, departure, arrival)
+        logger.warning("Duracao nao positiva (%s min): %r -> %r", minutos, departure, arrival)
         return None
     return minutos
 
@@ -155,7 +157,7 @@ def _resolve_duration(raw: Any, departure: Any, arrival: Any) -> int | None:
         return minutos
     calculado = duration_from_timestamps(departure, arrival)
     if calculado is not None:
-        logger.info("Duracao %r nao reconhecida; calculei %s min pelos horarios", raw, calculado)
+        logger.info("durationMinutes ausente; calculei %s min pelos horarios", calculado)
     return calculado
 
 
@@ -206,6 +208,7 @@ class GeckoClient:
     Cada tentativa HTTP custa creditos, entao:
       * `credit_hook` e chamado logo apos cada request ser despachado, para o
         ledger registrar o gasto mesmo se a resposta falhar depois;
+      * `refund_hook` lanca o estorno em 5xx, que a GeckoAPI devolve;
       * `budget_guard` e consultado antes de cada tentativa (inclusive antes
         de um retry) e aborta se nao houver saldo.
     """
@@ -249,10 +252,10 @@ class GeckoClient:
                 )
 
             if attempt > 1 and self.retry_delay_seconds:
-                # A GeckoAPI raspa o site da companhia. Um UPSTREAM_TIMEOUT diz
-                # que o site estava lento; repetir no segundo seguinte encontra
-                # a mesma lentidao e queima mais 5 creditos. A pausa e barata:
-                # o job do Actions tem 6h de teto.
+                # A GeckoAPI raspa o site de origem. Um UPSTREAM_TIMEOUT diz que
+                # o site estava lento; repetir no segundo seguinte encontra a
+                # mesma lentidao e queima mais 5 creditos. A pausa e barata: o
+                # job do Actions tem 6h de teto.
                 logger.info(
                     "GeckoAPI | %s | aguardando %ss antes da tentativa %s",
                     label,
@@ -318,13 +321,14 @@ class GeckoClient:
 
 
 # --------------------------------------------------------------------------
-# Montagem dos corpos de request
+# Request
 # --------------------------------------------------------------------------
 
 
-def build_latam_body(settings: Settings) -> dict[str, Any]:
+def build_kayak_body(settings: Settings) -> dict[str, Any]:
+    """Busca so pela rota e datas: a companhia vem na resposta, nao no filtro."""
     return {
-        "target": TARGET_LATAM,
+        "target": TARGET_KAYAK,
         "type": EXTRACT_TYPE,
         "from": settings.origin,
         "to": settings.destination,
@@ -333,258 +337,191 @@ def build_latam_body(settings: Settings) -> dict[str, Any]:
         "numAdults": settings.num_adults,
         "numChildren": settings.num_children,
         "numInfants": settings.num_infants,
-    }
-
-
-def build_azul_body(settings: Settings) -> dict[str, Any]:
-    return {
-        "target": TARGET_AZUL,
-        "type": EXTRACT_TYPE,
-        "from": settings.origin,
-        "to": settings.destination,
-        "departureDate": settings.departure_date,
-        "returnDate": settings.return_date,
-        "numAdults": settings.num_adults,
-        "numChildren": settings.num_children,
-        "numInfants": settings.num_infants,
+        "lang": "pt-BR",
         "currency": settings.currency,
     }
 
 
 # --------------------------------------------------------------------------
-# Parser LATAM: data.items[]
+# Parser
 # --------------------------------------------------------------------------
 
 
-def _latam_item_price(item: dict[str, Any]) -> float | None:
-    price = item.get("price") or {}
-    return _as_float(price.get("amount")) or _as_float(price.get("total"))
+def _airline_names(item: dict[str, Any], codigo_para_nome: dict[str, str]) -> str:
+    """Nome das companhias que operam a viagem.
+
+    Preferimos `segments[].airlineName`, que ja vem pronto. O mapa de
+    `data.airlines[]` cobre o caso de o segmento trazer so o codigo. Voos com
+    ida numa companhia e volta em outra viram "GOL + LATAM".
+    """
+    nomes: list[str] = []
+    for leg in item.get("legs") or []:
+        if not isinstance(leg, dict):
+            continue
+        for segment in leg.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            nome = segment.get("airlineName") or codigo_para_nome.get(
+                str(segment.get("airlineCode") or "")
+            )
+            if nome and nome not in nomes:
+                nomes.append(str(nome))
+
+    if nomes:
+        return " + ".join(nomes)
+
+    # Ultimo recurso: os codigos no proprio leg.
+    codigos: list[str] = []
+    for leg in item.get("legs") or []:
+        if isinstance(leg, dict):
+            for codigo in leg.get("airlineCodes") or []:
+                nome = codigo_para_nome.get(str(codigo), str(codigo))
+                if nome not in codigos:
+                    codigos.append(nome)
+    return " + ".join(codigos) if codigos else "companhia nao informada"
 
 
-def _latam_item_to_leg(item: dict[str, Any]) -> Leg:
-    route = item.get("route") or {}
-    flight = item.get("flight") or {}
-    departure = route.get("departure")
-    arrival = route.get("arrival")
+def _cheapest_booking_option(item: dict[str, Any]) -> tuple[str | None, bool | None, str | None]:
+    """Vendedor mais barato: (nome, e_venda_direta, url).
+
+    `isDirect` distingue compra no site da companhia de compra por agencia
+    (123Milhas, MaxMilhas, Decolar). Nao filtramos por isso - o embed mostra
+    quem vende e voce decide.
+    """
+    opcoes = item.get("bookingOptions")
+    if not isinstance(opcoes, list):
+        return None, None, None
+
+    melhor: dict[str, Any] | None = None
+    melhor_preco: float | None = None
+    for opcao in opcoes:
+        if not isinstance(opcao, dict):
+            continue
+        preco = _as_float(_dig(opcao, "totalPrice", "amount")) or _as_float(
+            _dig(opcao, "price", "amount")
+        )
+        if preco is None:
+            continue
+        if melhor_preco is None or preco < melhor_preco:
+            melhor, melhor_preco = opcao, preco
+
+    if melhor is None:
+        return None, None, None
+    nome = melhor.get("providerName") or melhor.get("providerCode")
+    url = melhor.get("bookingUrl") or melhor.get("universalLinkUrl")
+    direto = melhor.get("isDirect")
+    return (str(nome) if nome else None, bool(direto) if direto is not None else None, url)
+
+
+def _seats_remaining(item: dict[str, Any]) -> int | None:
+    """Menor numero de assentos restantes entre os segmentos.
+
+    O gargalo da viagem inteira e o trecho com menos lugares. E o dado de
+    urgencia mais proximo de "validade da tarifa", que nenhum target expoe.
+    """
+    valores: list[int] = []
+    for leg in item.get("legs") or []:
+        if not isinstance(leg, dict):
+            continue
+        for segment in leg.get("segments") or []:
+            if isinstance(segment, dict):
+                assentos = _as_int(segment.get("seatsRemaining"))
+                if assentos is not None and assentos > 0:
+                    valores.append(assentos)
+    return min(valores) if valores else None
+
+
+def _leg_to_model(leg: dict[str, Any]) -> Leg:
+    departure = leg.get("departure")
+    arrival = leg.get("arrival")
     return Leg(
-        origin=str(route.get("originIata") or ""),
-        destination=str(route.get("destinationIata") or ""),
+        origin=str(leg.get("origin") or ""),
+        destination=str(leg.get("destination") or ""),
         departure=departure,
         arrival=arrival,
-        duration_minutes=_resolve_duration(flight.get("durationMinutes"), departure, arrival),
-        stops=_as_int(flight.get("stops")),
+        duration_minutes=_resolve_duration(leg.get("durationMinutes"), departure, arrival),
+        stops=_as_int(leg.get("stops")),
     )
 
 
-def _cheapest_latam_item(
-    items: Iterable[dict[str, Any]], origin: str
-) -> tuple[dict[str, Any] | None, float | None]:
-    best_item: dict[str, Any] | None = None
-    best_price: float | None = None
-    for item in items:
-        if str(_dig(item, "route", "originIata") or "").upper() != origin.upper():
-            continue
-        price = _latam_item_price(item)
-        if price is None:
-            continue
-        if best_price is None or price < best_price:
-            best_item, best_price = item, price
-    return best_item, best_price
+def _item_price(item: dict[str, Any]) -> float | None:
+    return _as_float(_dig(item, "price", "amount"))
 
 
-def parse_latam(payload: dict[str, Any], settings: Settings) -> Offer:
-    """Extrai a combinacao mais barata de ida + volta da resposta da LATAM.
+def parse_kayak(payload: dict[str, Any], settings: Settings) -> Offer:
+    """Extrai a viagem mais barata da resposta do KAYAK.
 
-    A LATAM devolve uma lista plana em `data.items[]`, misturando os dois
-    sentidos; separamos por `route.originIata` e somamos o mais barato de cada
-    lado. Se a API so devolver um sentido, o preco e usado como esta e a volta
-    fica None (a resposta bruta no banco permite reprocessar depois).
+    O KAYAK ja marca a mais barata em `isCheapest`; conferimos contra o menor
+    `price.amount` e ficamos com o menor dos dois, porque a flag e do ranking
+    deles e o preco e o que voce paga.
     """
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise GeckoAPIParseError("LATAM: resposta sem o objeto 'data'", payload)
+        raise GeckoAPIParseError("KAYAK: resposta sem o objeto 'data'", payload)
 
     if data.get("success") is False:
-        raise GeckoAPIParseError("LATAM: a API marcou a extracao como success=false", payload)
+        raise GeckoAPIParseError("KAYAK: a API marcou a extracao como success=false", payload)
 
     items = data.get("items")
     if not isinstance(items, list) or not items:
-        raise GeckoAPIParseError("LATAM: 'data.items' vazio ou ausente", payload)
+        raise GeckoAPIParseError("KAYAK: 'data.items' vazio ou ausente", payload)
 
-    outbound_item, outbound_price = _cheapest_latam_item(items, settings.origin)
-    inbound_item, inbound_price = _cheapest_latam_item(items, settings.destination)
-
-    if outbound_item is None:
+    candidatos = [
+        (item, preco)
+        for item in items
+        if isinstance(item, dict) and (preco := _item_price(item)) is not None
+    ]
+    if not candidatos:
         raise GeckoAPIParseError(
-            f"LATAM: nenhum voo saindo de {settings.origin} em {len(items)} itens",
-            payload,
+            f"KAYAK: nenhum dos {len(items)} itens tem price.amount", payload
         )
 
-    outbound = _latam_item_to_leg(outbound_item)
-    inbound = _latam_item_to_leg(inbound_item) if inbound_item else None
+    marcado = next((item for item, _ in candidatos if item.get("isCheapest")), None)
+    escolhido, preco = min(candidatos, key=lambda par: par[1])
+    if marcado is not None:
+        preco_marcado = _item_price(marcado)
+        if preco_marcado is not None and preco_marcado < preco:
+            escolhido, preco = marcado, preco_marcado
+        elif preco_marcado is not None and preco_marcado > preco:
+            logger.info(
+                "isCheapest apontava %.2f, mas achei %.2f mais barato; usando o menor",
+                preco_marcado,
+                preco,
+            )
 
-    if inbound_price is None:
-        logger.warning(
-            "LATAM: nenhum trecho de volta saindo de %s; usando so o preco da ida",
-            settings.destination,
-        )
-        total = outbound_price or 0.0
-    else:
-        total = (outbound_price or 0.0) + inbound_price
+    codigo_para_nome = {
+        str(a.get("code")): str(a.get("name"))
+        for a in (data.get("airlines") or [])
+        if isinstance(a, dict) and a.get("code") and a.get("name")
+    }
 
-    if total <= 0:
-        raise GeckoAPIParseError("LATAM: nao encontrei preco valido nos itens", payload)
+    legs = [leg for leg in (escolhido.get("legs") or []) if isinstance(leg, dict)]
+    if not legs:
+        raise GeckoAPIParseError("KAYAK: item escolhido nao tem legs", payload)
 
-    currency = str(_dig(outbound_item, "price", "currency") or settings.currency)
+    outbound = _leg_to_model(legs[0])
+    inbound = _leg_to_model(legs[1]) if len(legs) > 1 else None
+    if inbound is None:
+        logger.warning("KAYAK devolveu so um leg; a volta ficara vazia no embed")
+
+    provider, provider_is_direct, booking_url = _cheapest_booking_option(escolhido)
 
     return Offer(
-        airline=LATAM,
-        price=round(total, 2),
-        currency=currency,
+        airline=_airline_names(escolhido, codigo_para_nome),
+        price=round(preco, 2),
+        currency=str(_dig(escolhido, "price", "currency") or settings.currency),
         outbound=outbound,
         inbound=inbound,
-        fare_valid_until=None,  # nao exposto pela GeckoAPI
+        provider=provider,
+        provider_is_direct=provider_is_direct,
+        booking_url=booking_url or escolhido.get("shareableUrl"),
+        seats_remaining=_seats_remaining(escolhido),
+        fare_valid_until=None,  # nenhum target da GeckoAPI expoe validade
         raw_response=payload,
+        total_options=_as_int(data.get("totalResults")) or len(items),
     )
 
 
-# --------------------------------------------------------------------------
-# Parser Azul: data.trips[].journeys[]
-# --------------------------------------------------------------------------
-
-
-def _azul_journey_price(journey: dict[str, Any]) -> float | None:
-    cheapest = _as_float(_dig(journey, "cheapestFare", "total", "amount"))
-    if cheapest is not None:
-        return cheapest
-    fares = journey.get("fares")
-    if not isinstance(fares, list):
-        return None
-    prices = [
-        price
-        for fare in fares
-        if isinstance(fare, dict) and (price := _as_float(_dig(fare, "total", "amount"))) is not None
-    ]
-    return min(prices) if prices else None
-
-
-def _azul_journey_to_leg(journey: dict[str, Any]) -> Leg:
-    departure = journey.get("departure")
-    arrival = journey.get("arrival")
-    return Leg(
-        origin=str(journey.get("origin") or ""),
-        destination=str(journey.get("destination") or ""),
-        departure=departure,
-        arrival=arrival,
-        duration_minutes=_resolve_duration(journey.get("duration"), departure, arrival),
-        stops=_as_int(journey.get("stopsCount")),
-    )
-
-
-def _cheapest_azul_journey(
-    trip: dict[str, Any],
-) -> tuple[dict[str, Any] | None, float | None, str | None]:
-    journeys = trip.get("journeys")
-    if not isinstance(journeys, list):
-        return None, None, None
-
-    best: dict[str, Any] | None = None
-    best_price: float | None = None
-    currency: str | None = None
-    for journey in journeys:
-        if not isinstance(journey, dict):
-            continue
-        if journey.get("available") is False:
-            continue
-        price = _azul_journey_price(journey)
-        if price is None:
-            continue
-        if best_price is None or price < best_price:
-            best, best_price = journey, price
-            currency = _dig(journey, "cheapestFare", "total", "currency") or trip.get("currency")
-    return best, best_price, currency
-
-
-def _find_azul_trip(trips: list[Any], origin: str) -> dict[str, Any] | None:
-    for trip in trips:
-        if isinstance(trip, dict) and str(trip.get("origin") or "").upper() == origin.upper():
-            return trip
-    return None
-
-
-def parse_azul(payload: dict[str, Any], settings: Settings) -> Offer:
-    """Extrai a combinacao mais barata de ida + volta da resposta da Azul.
-
-    A Azul ja separa os sentidos em `data.trips[]` (um trip por trecho), entao
-    localizamos cada trip pela origem e pegamos a journey mais barata de cada.
-    """
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise GeckoAPIParseError("Azul: resposta sem o objeto 'data'", payload)
-
-    trips = data.get("trips")
-    if not isinstance(trips, list) or not trips:
-        notifications = data.get("notifications") or []
-        detail = "; ".join(
-            str(n.get("message")) for n in notifications if isinstance(n, dict) and n.get("message")
-        )
-        raise GeckoAPIParseError(
-            f"Azul: 'data.trips' vazio ou ausente. {detail}".strip(), payload
-        )
-
-    outbound_trip = _find_azul_trip(trips, settings.origin)
-    inbound_trip = _find_azul_trip(trips, settings.destination)
-
-    if outbound_trip is None:
-        # Fallback: se a API nao rotulou a origem como esperado, usa a ordem.
-        logger.warning("Azul: nao achei trip saindo de %s; usando trips[0]", settings.origin)
-        outbound_trip = trips[0] if isinstance(trips[0], dict) else None
-        inbound_trip = trips[1] if len(trips) > 1 and isinstance(trips[1], dict) else None
-
-    if outbound_trip is None:
-        raise GeckoAPIParseError("Azul: nao consegui identificar o trecho de ida", payload)
-
-    outbound_journey, outbound_price, currency = _cheapest_azul_journey(outbound_trip)
-    if outbound_journey is None or outbound_price is None:
-        raise GeckoAPIParseError("Azul: nenhuma journey de ida com tarifa disponivel", payload)
-
-    inbound_journey = inbound_price = None
-    if inbound_trip is not None:
-        inbound_journey, inbound_price, _ = _cheapest_azul_journey(inbound_trip)
-
-    if inbound_price is None:
-        logger.warning("Azul: sem trecho de volta com tarifa; usando so o preco da ida")
-        total = outbound_price
-    else:
-        total = outbound_price + inbound_price
-
-    return Offer(
-        airline=AZUL,
-        price=round(total, 2),
-        currency=str(currency or data.get("currency") or settings.currency),
-        outbound=_azul_journey_to_leg(outbound_journey),
-        inbound=_azul_journey_to_leg(inbound_journey) if inbound_journey else None,
-        fare_valid_until=None,  # nao exposto pela GeckoAPI
-        raw_response=payload,
-    )
-
-
-# --------------------------------------------------------------------------
-# API publica
-# --------------------------------------------------------------------------
-
-
-def fetch_latam(client: GeckoClient, settings: Settings) -> Offer:
-    payload = client.extract(build_latam_body(settings), label="LATAM")
-    return parse_latam(payload, settings)
-
-
-def fetch_azul(client: GeckoClient, settings: Settings) -> Offer:
-    payload = client.extract(build_azul_body(settings), label="Azul")
-    return parse_azul(payload, settings)
-
-
-FETCHERS: dict[str, Callable[[GeckoClient, Settings], Offer]] = {
-    LATAM: fetch_latam,
-    AZUL: fetch_azul,
-}
+def fetch_kayak(client: GeckoClient, settings: Settings) -> Offer:
+    payload = client.extract(build_kayak_body(settings), label="KAYAK")
+    return parse_kayak(payload, settings)

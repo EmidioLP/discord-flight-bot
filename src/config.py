@@ -13,9 +13,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-LATAM = "LATAM"
-AZUL = "AZUL"
-AIRLINES = (LATAM, AZUL)
+# A busca e feita no KAYAK (metabusca) sem filtrar companhia: uma request cobre
+# todas, custa metade de LATAM+Azul separados, e a companhia vem na resposta.
+SOURCE = "KAYAK"
 
 
 class ConfigError(RuntimeError):
@@ -87,8 +87,8 @@ class Settings:
 
     @property
     def credits_per_full_check(self) -> int:
-        """Uma checagem completa = 1 request LATAM + 1 request Azul."""
-        return self.credits_per_request * len(AIRLINES)
+        """Uma checagem = uma request ao KAYAK."""
+        return self.credits_per_request
 
     @property
     def route_label(self) -> str:
@@ -119,14 +119,14 @@ def load_settings(*, require_secrets: bool = True) -> Settings:
         currency=_get("CURRENCY", "BRL").upper(),
         monthly_credit_budget=_get_int("MONTHLY_CREDIT_BUDGET", 100),
         credits_per_request=_get_int("CREDITS_PER_REQUEST", 5),
-        check_interval_days=_get_int("CHECK_INTERVAL_DAYS", 4),
+        check_interval_days=_get_int("CHECK_INTERVAL_DAYS", 2),
         db_path=db_path,
         turso_database_url=_get("TURSO_DATABASE_URL", ""),
         turso_auth_token=_get("TURSO_AUTH_TOKEN", ""),
         http_timeout_seconds=_get_int("HTTP_TIMEOUT_SECONDS", 120),
         http_max_retries=_get_int("HTTP_MAX_RETRIES", 1),
         http_retry_delay_seconds=_get_int("HTTP_RETRY_DELAY_SECONDS", 60),
-        max_credits_per_run=_get_int("MAX_CREDITS_PER_RUN", 20),
+        max_credits_per_run=_get_int("MAX_CREDITS_PER_RUN", 10),
         log_level=_get("LOG_LEVEL", "INFO").upper(),
     )
 

@@ -93,6 +93,12 @@ class TestBuildComparison:
 class TestHistoricalLow:
     def test_none_quando_nao_ha_registro(self, conn):
         assert historical_low(conn, "LATAM") is None
+        assert historical_low(conn) is None
+
+    def test_sem_filtro_e_global(self, conn):
+        save(conn, "LATAM", 1500.0, "2026-07-01T10:00:00+00:00")
+        save(conn, "AZUL", 980.0, "2026-07-02T10:00:00+00:00")
+        assert historical_low(conn) == 980.0
 
     def test_pega_o_menor_preco(self, conn):
         save(conn, "LATAM", 1500.0, "2026-07-01T10:00:00+00:00")
@@ -138,9 +144,16 @@ class TestCompareWithHistory:
         assert c.historical_low == 1000.0  # e nao 950
         assert c.is_new_low is True
 
-    def test_companhias_nao_se_misturam(self, conn):
+    def test_historico_e_global_por_padrao(self, conn):
+        """A busca no KAYAK nao fixa companhia, entao o minimo tem que ser global."""
         save(conn, "AZUL", 700.0, "2026-07-01T10:00:00+00:00")
-        c = compare_with_history(conn, "LATAM", 1200.0)
+        c = compare_with_history(conn, "GOL", 1200.0)
+        assert c.is_first_check is False
+        assert c.historical_low == 700.0
+
+    def test_pode_filtrar_por_companhia(self, conn):
+        save(conn, "AZUL", 700.0, "2026-07-01T10:00:00+00:00")
+        c = compare_with_history(conn, "GOL", 1200.0, global_history=False)
         assert c.is_first_check is True
 
 

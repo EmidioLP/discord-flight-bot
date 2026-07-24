@@ -3,9 +3,10 @@ name: Checagem de precos
 on:
   schedule:
     # 12:00 UTC = 09:00 em Belem (UTC-3, sem horario de verao).
-    # Dia-do-mes */4 => dias 1, 5, 9, 13, 17, 21, 25 e 29 = no maximo 8
-    # execucoes/mes = 80 creditos, dentro dos 100 do plano free.
-    - cron: "0 12 */4 * *"
+    # Dia-do-mes */2 => dias impares = no maximo 16 execucoes/mes. Com o KAYAK
+    # cada checagem custa 5 creditos (uma request), entao 16 x 5 = 80, dentro
+    # dos 100 do plano free e com folga para retries.
+    - cron: "0 12 */2 * *"
   # Permite disparar na mao pela aba Actions (gasta 10 creditos).
   workflow_dispatch:
 

@@ -2,6 +2,9 @@
 
 Webhook em vez de bot completo: nao ha comandos a atender, so notificacao de
 mao unica, entao nao precisamos manter um gateway websocket aberto.
+
+Uma checagem gera exatamente um embed: a viagem mais barata que o KAYAK achou,
+com a companhia e o vendedor identificados na propria mensagem.
 """
 
 from __future__ import annotations
@@ -18,12 +21,13 @@ from .models import Leg, Offer, format_money
 logger = logging.getLogger(__name__)
 
 COLOR_NEW_LOW = 0x2ECC71  # verde
-COLOR_CHEAPER = 0x3498DB  # azul
+COLOR_TIE = 0x3498DB  # azul
 COLOR_HIGHER = 0xE67E22  # laranja
 COLOR_NEUTRAL = 0x95A5A6  # cinza
 COLOR_ERROR = 0xE74C3C  # vermelho
 
-AIRLINE_LABELS = {"LATAM": "LATAM Airlines", "AZUL": "Azul Linhas Aereas"}
+# Poucos assentos restantes viram destaque no embed.
+SEATS_ALERT_THRESHOLD = 3
 
 
 class DiscordError(RuntimeError):
@@ -63,7 +67,7 @@ def _pick_color(comparison: Comparison) -> int:
     if comparison.is_new_low:
         return COLOR_NEW_LOW
     if comparison.is_tie:
-        return COLOR_CHEAPER
+        return COLOR_TIE
     return COLOR_HIGHER
 
 
@@ -72,17 +76,8 @@ def build_embed(
     comparison: Comparison,
     route_label: str,
     credits_summary: dict[str, Any] | None = None,
-    alternatives: list[tuple[str, float]] | None = None,
-    failures: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Monta o embed da companhia mais barata da checagem.
-
-    `alternatives` sao as demais companhias consultadas com sucesso, para o
-    embed mostrar quanto a escolhida esta mais barata. `failures` sao as que
-    nao responderam - viram uma nota no rodape do embed em vez de uma segunda
-    mensagem, para cada checagem gerar exatamente uma notificacao.
-    """
-    airline_name = AIRLINE_LABELS.get(offer.airline, offer.airline)
+    """Monta o embed da viagem mais barata da checagem."""
     title_prefix = "NOVO MENOR PRECO - " if comparison.is_new_low else ""
 
     historical = (
@@ -97,6 +92,8 @@ def build_embed(
             "value": f"## {format_money(offer.price, offer.currency)}",
             "inline": False,
         },
+        {"name": "Companhia aerea", "value": offer.airline, "inline": True},
+        {"name": "Vendido por", "value": offer.provider_label, "inline": True},
         {
             "name": "Menor preco historico",
             "value": f"{historical}\n{comparison.summary(offer.currency)}",
@@ -106,27 +103,19 @@ def build_embed(
         {"name": "Volta", "value": _leg_block(offer.inbound), "inline": True},
     ]
 
-    if alternatives:
-        linhas = []
-        for nome, preco in sorted(alternatives, key=lambda item: item[1]):
-            rotulo = AIRLINE_LABELS.get(nome, nome)
-            diferenca = preco - offer.price
-            linhas.append(
-                f"{rotulo}: {format_money(preco, offer.currency)} "
-                f"(+{format_money(diferenca, offer.currency)})"
-                if diferenca > 0
-                else f"{rotulo}: {format_money(preco, offer.currency)}"
-            )
-        fields.append(
-            {"name": "Outras companhias nesta checagem", "value": "\n".join(linhas), "inline": False}
-        )
-
     if offer.total_duration_minutes is not None:
         hours, minutes = divmod(offer.total_duration_minutes, 60)
         fields.append(
+            {"name": "Tempo total em voo", "value": f"{hours}h{minutes:02d}min", "inline": False}
+        )
+
+    if offer.seats_remaining is not None:
+        plural = "assento" if offer.seats_remaining == 1 else "assentos"
+        alerta = " **- corre!**" if offer.seats_remaining <= SEATS_ALERT_THRESHOLD else ""
+        fields.append(
             {
-                "name": "Tempo total em voo",
-                "value": f"{hours}h{minutes:02d}min",
+                "name": "Assentos restantes",
+                "value": f"{offer.seats_remaining} {plural} no trecho mais apertado{alerta}",
                 "inline": False,
             }
         )
@@ -137,56 +126,50 @@ def build_embed(
             "value": (
                 offer.fare_valid_until
                 if offer.fare_valid_until
-                else "_A GeckoAPI nao expoe validade de tarifa; o preco vale para o "
-                "momento da consulta e costuma mudar em horas._"
+                else "_Nenhum target da GeckoAPI expoe validade de tarifa. O preco vale "
+                "para o momento da consulta e costuma mudar em horas._"
             ),
             "inline": False,
         }
     )
 
     if comparison.diff_vs_previous is not None:
-        direction = "subiu" if comparison.diff_vs_previous > 0 else "caiu"
         if comparison.diff_vs_previous == 0:
-            text = "Sem mudanca desde a checagem anterior."
+            texto = "Sem mudanca desde a checagem anterior."
         else:
-            text = (
-                f"{direction} {format_money(abs(comparison.diff_vs_previous), offer.currency)} "
-                f"desde a ultima checagem"
-            )
-        fields.append({"name": "Desde a ultima checagem", "value": text, "inline": False})
+            direcao = "subiu" if comparison.diff_vs_previous > 0 else "caiu"
+            valor = format_money(abs(comparison.diff_vs_previous), offer.currency)
+            texto = f"{direcao} {valor} desde a ultima checagem"
+        fields.append({"name": "Desde a ultima checagem", "value": texto, "inline": False})
 
-    if failures:
-        fields.append(
-            {
-                "name": "Nao consegui consultar",
-                "value": "\n".join(f"**{AIRLINE_LABELS.get(n, n)}**: {e}"[:300] for n, e in failures),
-                "inline": False,
-            }
-        )
+    descricao = f"Viagem mais barata encontrada | {route_label}"
+    if offer.total_options:
+        descricao += f" | {offer.total_options} opcoes avaliadas"
 
-    footer = f"{route_label} | consultado em {_format_datetime(offer.checked_at)}"
+    footer = f"KAYAK | consultado em {_format_datetime(offer.checked_at)}"
     if credits_summary:
         footer += (
             f" | creditos {credits_summary['used']}/{credits_summary['budget']} "
             f"em {credits_summary['year_month']}"
         )
 
-    descricao = f"Mais barata desta checagem | {route_label}" if alternatives else route_label
-
-    return {
-        "title": f"{title_prefix}{airline_name}",
+    embed: dict[str, Any] = {
+        "title": f"{title_prefix}{format_money(offer.price, offer.currency)} - {offer.airline}",
         "description": descricao,
         "color": _pick_color(comparison),
         "fields": fields,
         "footer": {"text": footer[:2048]},
         "timestamp": offer.checked_at,
     }
+    if offer.booking_url:
+        embed["url"] = offer.booking_url
+    return embed
 
 
-def build_error_embed(airline: str, error: Exception, route_label: str) -> dict[str, Any]:
+def build_error_embed(source: str, error: Exception, route_label: str) -> dict[str, Any]:
     """Embed de falha, para voce saber que a checagem quebrou em vez de silenciar."""
     return {
-        "title": f"Falha ao consultar {AIRLINE_LABELS.get(airline, airline)}",
+        "title": f"Falha ao consultar {source}",
         "description": f"{route_label}\n```\n{type(error).__name__}: {error}\n```"[:4000],
         "color": COLOR_ERROR,
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -221,26 +204,20 @@ def notify_offer(
     comparison: Comparison,
     route_label: str,
     credits_summary: dict[str, Any] | None = None,
-    alternatives: list[tuple[str, float]] | None = None,
-    failures: list[tuple[str, str]] | None = None,
     timeout: int = 30,
 ) -> None:
-    send_embed(
-        webhook_url,
-        build_embed(offer, comparison, route_label, credits_summary, alternatives, failures),
-        timeout,
-    )
+    send_embed(webhook_url, build_embed(offer, comparison, route_label, credits_summary), timeout)
 
 
 def notify_error(
     webhook_url: str,
-    airline: str,
+    source: str,
     error: Exception,
     route_label: str,
     timeout: int = 30,
 ) -> None:
     """Notifica falha sem propagar excecao nova (nao queremos derrubar o pipeline)."""
     try:
-        send_embed(webhook_url, build_error_embed(airline, error, route_label), timeout)
+        send_embed(webhook_url, build_error_embed(source, error, route_label), timeout)
     except DiscordError:
-        logger.exception("Nao consegui nem avisar o erro no Discord (%s)", airline)
+        logger.exception("Nao consegui nem avisar o erro no Discord (%s)", source)

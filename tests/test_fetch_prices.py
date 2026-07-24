@@ -1,7 +1,7 @@
-"""Testes dos parsers e do cliente HTTP, com a API mockada.
+"""Testes do parser do KAYAK e do cliente HTTP, com a API mockada.
 
-Os payloads seguem o schema documentado em https://geckoapi.com.br/docs para
-os targets latamairlines.com:plp e voeazul.com.br:plp.
+Os payloads seguem o schema documentado em
+https://geckoapi.com.br/docs/kayak-com-br-plp
 """
 
 from __future__ import annotations
@@ -17,13 +17,11 @@ from src.fetch_prices import (
     GeckoAPIParseError,
     GeckoAPITimeout,
     GeckoClient,
-    build_azul_body,
-    build_latam_body,
-    fetch_azul,
-    fetch_latam,
+    build_kayak_body,
+    duration_from_timestamps,
+    fetch_kayak,
     parse_duration_to_minutes,
-    parse_latam,
-    parse_azul,
+    parse_kayak,
 )
 
 # --------------------------------------------------------------------------
@@ -31,114 +29,99 @@ from src.fetch_prices import (
 # --------------------------------------------------------------------------
 
 
-def latam_item(origin, destination, departure, arrival, minutes, stops, amount):
+def segment(origin, destination, departure, arrival, minutes, code, name, seats=9):
     return {
-        "recordType": "FLIGHT_OPTION",
-        "position": {"flightOption": 1, "brand": 1},
-        "route": {
-            "originIata": origin,
-            "destinationIata": destination,
-            "departure": departure,
-            "arrival": arrival,
-        },
-        "flight": {
-            "flightCode": "LA1234",
-            "durationMinutes": minutes,
-            "stops": stops,
-            "segments": [{"flightNumber": "1234"}],
-        },
-        "fare": {"brandId": "LIGHT", "brandText": "Light", "cabinLabel": "Economy"},
-        "price": {
-            "currency": "BRL",
-            "amount": amount,
-            "display": f"R$ {amount}",
-            "total": amount,
-        },
-    }
-
-
-LATAM_PAYLOAD = {
-    "requestId": "req-1",
-    "executionId": "exec-1",
-    "data": {
-        "source": "latamairlines.com",
-        "type": "plp",
-        "searchType": "ROUND_TRIP",
-        "from": "BEL",
-        "to": "NAT",
-        "departureDate": "2026-12-27",
-        "returnDate": "2027-01-05",
-        "success": True,
-        "totalResults": 4,
-        "items": [
-            latam_item("BEL", "NAT", "2026-12-27T08:15:00.000Z", "2026-12-27T12:40:00.000Z", 265, 1, 780.50),
-            latam_item("BEL", "NAT", "2026-12-27T22:10:00.000Z", "2026-12-28T01:20:00.000Z", 190, 0, 940.00),
-            latam_item("NAT", "BEL", "2027-01-05T14:00:00.000Z", "2027-01-05T17:05:00.000Z", 185, 0, 690.00),
-            latam_item("NAT", "BEL", "2027-01-05T06:00:00.000Z", "2027-01-05T11:30:00.000Z", 330, 2, 615.25),
-        ],
-    },
-}
-
-
-def azul_journey(origin, destination, departure, arrival, duration, stops, amount):
-    return {
-        "position": 1,
-        "id": "j1",
-        "journeyKey": "key",
+        "id": "s1",
         "origin": origin,
         "destination": destination,
         "departure": departure,
         "arrival": arrival,
-        "stopsCount": stops,
-        "available": True,
-        "duration": duration,
-        "segments": [],
-        "fares": [
-            {
-                "key": "f1",
-                "productClass": {"code": "A", "category": "cat", "name": "Mais Azul"},
-                "lowestFare": True,
-                "total": {"currency": "BRL", "amount": amount},
-            }
-        ],
-        "cheapestFare": {"key": "f1", "total": {"currency": "BRL", "amount": amount}},
+        "durationMinutes": minutes,
+        "airlineCode": code,
+        "airlineName": name,
+        "flightNumber": "1234",
+        "cabinCode": "e",
+        "cabinDisplay": "Economica",
+        "seatsRemaining": seats,
     }
 
 
-AZUL_PAYLOAD = {
-    "requestId": "req-2",
-    "executionId": "exec-2",
+def leg(origin, destination, departure, arrival, minutes, stops, codes, segments):
+    return {
+        "id": "l1",
+        "origin": origin,
+        "destination": destination,
+        "departure": departure,
+        "arrival": arrival,
+        "durationMinutes": minutes,
+        "stops": stops,
+        "airlineCodes": codes,
+        "segments": segments,
+    }
+
+
+def booking(provider, amount, is_direct=True):
+    return {
+        "bookingId": "b1",
+        "providerCode": provider[:3].upper(),
+        "providerName": provider,
+        "price": {"currency": "BRL", "amount": amount, "localizedPrice": f"R$ {amount}"},
+        "totalPrice": {"currency": "BRL", "amount": amount, "localizedPrice": f"R$ {amount}"},
+        "bookingUrl": f"https://exemplo/{provider}",
+        "isDirect": is_direct,
+    }
+
+
+def item(amount, code="G3", name="GOL", stops=1, seats=9, cheapest=False, bookings=None):
+    return {
+        "position": 1,
+        "tripId": "t1",
+        "isCheapest": cheapest,
+        "isBest": False,
+        "price": {"currency": "BRL", "amount": amount, "localizedPrice": f"R$ {amount}"},
+        "shareableUrl": "https://kayak.com.br/trip/1",
+        "legs": [
+            leg(
+                "BEL", "NAT", "2026-12-27T08:15:00", "2026-12-27T12:40:00", 265, stops, [code],
+                [segment("BEL", "NAT", "2026-12-27T08:15:00", "2026-12-27T12:40:00", 265,
+                         code, name, seats)],
+            ),
+            leg(
+                "NAT", "BEL", "2027-01-05T14:00:00", "2027-01-05T17:05:00", 185, 0, [code],
+                [segment("NAT", "BEL", "2027-01-05T14:00:00", "2027-01-05T17:05:00", 185,
+                         code, name, seats + 4)],
+            ),
+        ],
+        "bookingOptions": bookings if bookings is not None else [booking(name, amount)],
+    }
+
+
+KAYAK_PAYLOAD = {
+    "requestId": "req-1",
+    "executionId": "exec-1",
     "data": {
-        "source": "voeazul.com.br",
+        "source": "kayak.com.br",
         "type": "plp",
-        "searchType": "ROUND_TRIP",
-        "pricingMode": "cash",
+        "success": True,
+        "status": "complete",
         "from": "BEL",
         "to": "NAT",
+        "departureDate": "2026-12-27",
+        "returnDate": "2027-01-05",
         "currency": "BRL",
-        "totalResults": 3,
-        "trips": [
-            {
-                "position": 1,
-                "origin": "BEL",
-                "destination": "NAT",
-                "date": "2026-12-27",
-                "currency": "BRL",
-                "journeys": [
-                    azul_journey("BEL", "NAT", "2026-12-27T09:00:00", "2026-12-27T14:20:00", "PT5H20M", 1, 705.90),
-                    azul_journey("BEL", "NAT", "2026-12-27T18:00:00", "2026-12-27T21:10:00", "PT3H10M", 0, 850.00),
-                ],
-            },
-            {
-                "position": 2,
-                "origin": "NAT",
-                "destination": "BEL",
-                "date": "2027-01-05",
-                "currency": "BRL",
-                "journeys": [
-                    azul_journey("NAT", "BEL", "2027-01-05T07:30:00", "2027-01-05T10:35:00", "PT3H05M", 0, 640.10),
-                ],
-            },
+        "totalResults": 1111,
+        "cheapestPrice": {"currency": "BRL", "amount": 1180.00},
+        "airlines": [
+            {"code": "G3", "name": "GOL", "logoUrl": "x"},
+            {"code": "AD", "name": "Azul", "logoUrl": "y"},
+            {"code": "LA", "name": "LATAM", "logoUrl": "z"},
+        ],
+        "items": [
+            item(1512.00, "LA", "LATAM", stops=1, seats=9),
+            item(1180.00, "G3", "GOL", stops=1, seats=2, cheapest=True,
+                 bookings=[booking("123Milhas", 1180.00, is_direct=False),
+                           booking("GOL", 1290.00, is_direct=True)]),
+            item(1346.00, "AD", "Azul", stops=0, seats=7),
         ],
     },
 }
@@ -153,187 +136,181 @@ class TestParseDuration:
     @pytest.mark.parametrize(
         "valor,esperado",
         [
-            (265, 265),
-            (265.0, 265),
-            ("265", 265),
-            ("PT5H20M", 320),
-            ("PT3H", 180),
-            ("PT45M", 45),
-            ("P1DT2H30M", 1590),
-            ("05:20", 320),
-            ("05:20:00", 320),
-            ("00:45", 45),
-            (None, None),
-            ("", None),
-            ("mais ou menos 5 horas", None),
-            (True, None),
+            (265, 265), (265.0, 265), ("265", 265),
+            ("PT5H20M", 320), ("PT3H", 180), ("PT45M", 45), ("P1DT2H30M", 1590),
+            ("05:20", 320), ("05:20:00", 320), ("00:45", 45),
+            (None, None), ("", None), ("mais ou menos 5 horas", None), (True, None),
         ],
     )
     def test_normaliza_para_minutos(self, valor, esperado):
         assert parse_duration_to_minutes(valor) == esperado
 
 
+class TestDuracaoPelosHorarios:
+    @pytest.mark.parametrize(
+        "saida,chegada,esperado",
+        [
+            ("2026-12-27T09:00:00", "2026-12-27T14:20:00", 320),
+            ("2026-12-27T09:00:00.000Z", "2026-12-27T12:40:00.000Z", 220),
+            ("2026-12-27T22:10:00", "2026-12-28T01:20:00", 190),  # vira o dia
+            ("2026-12-27T09:00:00-03:00", "2026-12-27T14:20:00-03:00", 320),
+            (None, "2026-12-27T14:20:00", None),
+            ("nao e data", "2026-12-27T14:20:00", None),
+            ("2026-12-27T14:20:00", "2026-12-27T09:00:00", None),  # chegada antes
+            ("2026-12-27T09:00:00", "2026-12-27T09:00:00", None),  # zero
+        ],
+    )
+    def test_calcula(self, saida, chegada, esperado):
+        assert duration_from_timestamps(saida, chegada) == esperado
+
+    def test_fusos_incompativeis_nao_quebram(self):
+        assert duration_from_timestamps("2026-12-27T09:00:00", "2026-12-27T14:20:00Z") is None
+
+    def test_leg_sem_durationMinutes_usa_os_horarios(self, settings):
+        payload = {"data": {"success": True, "items": [item(900.0)]}}
+        payload["data"]["items"][0]["legs"][0]["durationMinutes"] = None
+        assert parse_kayak(payload, settings).outbound.duration_minutes == 265
+
+
 # --------------------------------------------------------------------------
-# Corpos de request
+# Request
 # --------------------------------------------------------------------------
 
 
-class TestRequestBodies:
-    def test_latam_usa_target_e_type_separados(self, settings):
-        body = build_latam_body(settings)
-        assert body["target"] == "latamairlines.com"
+class TestRequestBody:
+    def test_alvo_e_parametros(self, settings):
+        body = build_kayak_body(settings)
+        assert body["target"] == "kayak.com.br"
         assert body["type"] == "plp"
         assert body["from"] == "BEL"
         assert body["to"] == "NAT"
         assert body["departureDate"] == "2026-12-27"
         assert body["returnDate"] == "2027-01-05"
-        assert body["numAdults"] == 1
-
-    def test_azul_manda_currency(self, settings):
-        body = build_azul_body(settings)
-        assert body["target"] == "voeazul.com.br"
-        assert body["type"] == "plp"
         assert body["currency"] == "BRL"
+        assert body["lang"] == "pt-BR"
+
+    def test_nao_filtra_companhia(self, settings):
+        """A companhia vem na resposta; filtrar na busca esconderia a mais barata."""
+        assert not any("airline" in chave.lower() for chave in build_kayak_body(settings))
 
 
 # --------------------------------------------------------------------------
-# Parser LATAM
+# Parser
 # --------------------------------------------------------------------------
 
 
-class TestParseLatam:
-    def test_soma_o_mais_barato_de_cada_sentido(self, settings):
-        offer = parse_latam(LATAM_PAYLOAD, settings)
-        assert offer.airline == "LATAM"
-        assert offer.price == pytest.approx(780.50 + 615.25)
-        assert offer.currency == "BRL"
+class TestParseKayak:
+    def test_escolhe_a_viagem_mais_barata(self, settings):
+        assert parse_kayak(KAYAK_PAYLOAD, settings).price == pytest.approx(1180.00)
 
-    def test_ida_vem_do_item_mais_barato_saindo_da_origem(self, settings):
-        offer = parse_latam(LATAM_PAYLOAD, settings)
+    def test_identifica_a_companhia(self, settings):
+        assert parse_kayak(KAYAK_PAYLOAD, settings).airline == "GOL"
+
+    def test_identifica_o_vendedor_mais_barato(self, settings):
+        offer = parse_kayak(KAYAK_PAYLOAD, settings)
+        assert offer.provider == "123Milhas"
+        assert offer.provider_is_direct is False
+        assert offer.provider_label == "123Milhas (agencia)"
+
+    def test_venda_direta_e_rotulada(self, settings):
+        payload = {"data": {"success": True, "items": [
+            item(900.0, bookings=[booking("Azul", 900.0, is_direct=True)])
+        ]}}
+        assert parse_kayak(payload, settings).provider_label == "Azul (venda direta)"
+
+    def test_ida_e_volta_vem_dos_dois_legs(self, settings):
+        offer = parse_kayak(KAYAK_PAYLOAD, settings)
         assert offer.outbound.origin == "BEL"
         assert offer.outbound.duration_minutes == 265
         assert offer.outbound.stops == 1
-
-    def test_volta_vem_do_item_mais_barato_saindo_do_destino(self, settings):
-        offer = parse_latam(LATAM_PAYLOAD, settings)
         assert offer.inbound.origin == "NAT"
-        assert offer.inbound.duration_minutes == 330
-        assert offer.inbound.stops == 2
+        assert offer.inbound.duration_minutes == 185
+        assert offer.inbound.stops == 0
+
+    def test_assentos_restantes_pega_o_trecho_mais_apertado(self, settings):
+        assert parse_kayak(KAYAK_PAYLOAD, settings).seats_remaining == 2
+
+    def test_total_de_opcoes_avaliadas(self, settings):
+        assert parse_kayak(KAYAK_PAYLOAD, settings).total_options == 1111
 
     def test_guarda_a_resposta_bruta(self, settings):
-        assert parse_latam(LATAM_PAYLOAD, settings).raw_response is LATAM_PAYLOAD
+        assert parse_kayak(KAYAK_PAYLOAD, settings).raw_response is KAYAK_PAYLOAD
 
     def test_validade_de_tarifa_fica_none(self, settings):
-        """A GeckoAPI nao expoe validade; o campo precisa ficar explicitamente None."""
-        assert parse_latam(LATAM_PAYLOAD, settings).fare_valid_until is None
+        assert parse_kayak(KAYAK_PAYLOAD, settings).fare_valid_until is None
 
-    def test_so_ida_ainda_gera_oferta(self, settings):
-        payload = {"data": {"success": True, "items": [LATAM_PAYLOAD["data"]["items"][0]]}}
-        offer = parse_latam(payload, settings)
-        assert offer.price == pytest.approx(780.50)
+    def test_preco_menor_vence_a_flag_isCheapest(self, settings):
+        """A flag e do ranking do KAYAK; o preco e o que voce paga."""
+        payload = {"data": {"success": True, "items": [
+            item(1500.0, cheapest=True),
+            item(1100.0, "AD", "Azul"),
+        ]}}
+        assert parse_kayak(payload, settings).price == pytest.approx(1100.0)
+
+    def test_voo_com_duas_companhias(self, settings):
+        it = item(1000.0, "G3", "GOL")
+        it["legs"][1]["segments"][0]["airlineName"] = "LATAM"
+        assert parse_kayak({"data": {"success": True, "items": [it]}}, settings).airline == "GOL + LATAM"
+
+    def test_usa_o_mapa_de_airlines_quando_o_segmento_so_tem_codigo(self, settings):
+        it = item(1000.0, "AD", "Azul")
+        for perna in it["legs"]:
+            for seg in perna["segments"]:
+                seg["airlineName"] = None
+        payload = {"data": {"success": True, "airlines": [{"code": "AD", "name": "Azul"}],
+                            "items": [it]}}
+        assert parse_kayak(payload, settings).airline == "Azul"
+
+    def test_so_ida_nao_quebra(self, settings):
+        it = item(800.0)
+        it["legs"] = it["legs"][:1]
+        offer = parse_kayak({"data": {"success": True, "items": [it]}}, settings)
         assert offer.inbound is None
+        assert offer.outbound is not None
 
-    def test_sem_data_levanta(self, settings):
-        with pytest.raises(GeckoAPIParseError, match="sem o objeto 'data'"):
-            parse_latam({"requestId": "x"}, settings)
-
-    def test_items_vazio_levanta(self, settings):
-        with pytest.raises(GeckoAPIParseError, match="vazio ou ausente"):
-            parse_latam({"data": {"items": []}}, settings)
-
-    def test_success_false_levanta(self, settings):
-        with pytest.raises(GeckoAPIParseError, match="success=false"):
-            parse_latam({"data": {"success": False, "items": [1]}}, settings)
-
-    def test_nenhum_voo_da_origem_levanta(self, settings):
-        payload = {"data": {"success": True, "items": [LATAM_PAYLOAD["data"]["items"][2]]}}
-        with pytest.raises(GeckoAPIParseError, match="nenhum voo saindo de BEL"):
-            parse_latam(payload, settings)
-
-    def test_campos_nulos_nao_quebram(self, settings):
-        """A doc avisa que campos podem vir null em producao."""
-        item = latam_item("BEL", "NAT", None, None, None, None, 500.0)
-        offer = parse_latam({"data": {"success": True, "items": [item]}}, settings)
-        assert offer.price == 500.0
-        assert offer.outbound.duration_minutes is None
-        assert offer.outbound.stops is None
-        assert offer.outbound.duration_label == "nao informado"
-        assert offer.outbound.stops_label == "nao informado"
+    def test_sem_bookingOptions_cai_para_shareableUrl(self, settings):
+        it = item(800.0, bookings=[])
+        offer = parse_kayak({"data": {"success": True, "items": [it]}}, settings)
+        assert offer.provider is None
+        assert offer.provider_label == "vendedor nao informado"
+        assert offer.booking_url == "https://kayak.com.br/trip/1"
 
 
-# --------------------------------------------------------------------------
-# Parser Azul
-# --------------------------------------------------------------------------
+class TestParseKayakErros:
+    def test_sem_data(self, settings):
+        payload = {"requestId": "x"}
+        with pytest.raises(GeckoAPIParseError, match="sem o objeto 'data'") as exc:
+            parse_kayak(payload, settings)
+        assert exc.value.payload is payload
 
+    def test_items_vazio(self, settings):
+        payload = {"data": {"items": []}}
+        with pytest.raises(GeckoAPIParseError, match="vazio ou ausente") as exc:
+            parse_kayak(payload, settings)
+        assert exc.value.payload is payload
 
-class TestParseAzul:
-    def test_soma_a_journey_mais_barata_de_cada_trip(self, settings):
-        offer = parse_azul(AZUL_PAYLOAD, settings)
-        assert offer.airline == "AZUL"
-        assert offer.price == pytest.approx(705.90 + 640.10)
+    def test_success_false(self, settings):
+        payload = {"data": {"success": False, "items": [item(100.0)]}}
+        with pytest.raises(GeckoAPIParseError, match="success=false") as exc:
+            parse_kayak(payload, settings)
+        assert exc.value.payload is payload
 
-    def test_converte_duracao_iso_para_minutos(self, settings):
-        offer = parse_azul(AZUL_PAYLOAD, settings)
-        assert offer.outbound.duration_minutes == 320
-        assert offer.inbound.duration_minutes == 185
+    def test_nenhum_item_com_preco(self, settings):
+        it = item(100.0)
+        it["price"] = {}
+        payload = {"data": {"success": True, "items": [it]}}
+        with pytest.raises(GeckoAPIParseError, match="price.amount") as exc:
+            parse_kayak(payload, settings)
+        assert exc.value.payload is payload
 
-    def test_le_conexoes(self, settings):
-        offer = parse_azul(AZUL_PAYLOAD, settings)
-        assert offer.outbound.stops == 1
-        assert offer.inbound.stops == 0
-        assert offer.outbound.stops_label == "1 conexao"
-        assert offer.inbound.stops_label == "direto"
+    def test_item_sem_legs(self, settings):
+        it = item(100.0)
+        it["legs"] = []
+        with pytest.raises(GeckoAPIParseError, match="nao tem legs"):
+            parse_kayak({"data": {"success": True, "items": [it]}}, settings)
 
-    def test_ignora_journey_indisponivel(self, settings):
-        payload = {
-            "data": {
-                "currency": "BRL",
-                "trips": [
-                    {
-                        "origin": "BEL",
-                        "destination": "NAT",
-                        "journeys": [
-                            {**azul_journey("BEL", "NAT", None, None, "PT3H", 0, 100.0), "available": False},
-                            azul_journey("BEL", "NAT", None, None, "PT4H", 1, 500.0),
-                        ],
-                    }
-                ],
-            }
-        }
-        assert parse_azul(payload, settings).price == pytest.approx(500.0)
-
-    def test_cai_para_fares_quando_nao_ha_cheapestFare(self, settings):
-        journey = azul_journey("BEL", "NAT", None, None, "PT3H", 0, 400.0)
-        del journey["cheapestFare"]
-        journey["fares"].append(
-            {"key": "f2", "total": {"currency": "BRL", "amount": 310.0}}
-        )
-        payload = {"data": {"currency": "BRL", "trips": [{"origin": "BEL", "journeys": [journey]}]}}
-        assert parse_azul(payload, settings).price == pytest.approx(310.0)
-
-    def test_usa_ordem_dos_trips_quando_a_origem_nao_bate(self, settings):
-        payload = {
-            "data": {
-                "currency": "BRL",
-                "trips": [
-                    {"origin": "???", "journeys": [azul_journey("BEL", "NAT", None, None, "PT3H", 0, 300.0)]},
-                ],
-            }
-        }
-        assert parse_azul(payload, settings).price == pytest.approx(300.0)
-
-    def test_trips_vazio_levanta_com_a_notificacao_da_api(self, settings):
-        payload = {"data": {"trips": [], "notifications": [{"code": "E1", "message": "sem voos"}]}}
-        with pytest.raises(GeckoAPIParseError, match="sem voos"):
-            parse_azul(payload, settings)
-
-    def test_sem_tarifa_disponivel_levanta(self, settings):
-        payload = {"data": {"trips": [{"origin": "BEL", "journeys": []}]}}
-        with pytest.raises(GeckoAPIParseError, match="nenhuma journey de ida"):
-            parse_azul(payload, settings)
-
-    def test_validade_de_tarifa_fica_none(self, settings):
-        assert parse_azul(AZUL_PAYLOAD, settings).fare_valid_until is None
+    def test_payload_e_opcional_na_excecao(self):
+        assert GeckoAPIParseError("erro sem payload").payload is None
 
 
 # --------------------------------------------------------------------------
@@ -350,148 +327,65 @@ def fake_response(status_code=200, json_data=None, text=""):
 
 
 class TestGeckoClient:
-    def test_envia_bearer_token(self, settings):
+    def test_envia_bearer_token(self):
         session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
-        client = GeckoClient("minha-chave", session=session)
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
+        GeckoClient("minha-chave", session=session).extract({"target": "x"}, "KAYAK")
+        assert session.post.call_args.kwargs["headers"]["Authorization"] == "Bearer minha-chave"
 
-        client.extract({"target": "x"}, "LATAM")
-
-        headers = session.post.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer minha-chave"
-
-    def test_sucesso_devolve_json(self, settings):
+    def test_sucesso_devolve_json(self):
         session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
-        client = GeckoClient("k", session=session)
-        assert client.extract({}, "LATAM") == LATAM_PAYLOAD
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
+        assert GeckoClient("k", session=session).extract({}, "KAYAK") == KAYAK_PAYLOAD
 
-    def test_debita_credito_por_tentativa(self, settings):
+    def test_debita_credito_por_tentativa(self):
         session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
         gastos = []
-        client = GeckoClient("k", session=session, credit_hook=gastos.append)
-
-        client.extract({}, "LATAM")
+        GeckoClient("k", session=session, credit_hook=gastos.append).extract({}, "KAYAK")
         assert len(gastos) == 1
 
-    def test_retry_em_500_debita_dois_creditos(self, settings):
-        session = Mock()
-        session.post.side_effect = [
-            fake_response(status_code=500, text="boom"),
-            fake_response(json_data=LATAM_PAYLOAD),
-        ]
-        gastos = []
-        client = GeckoClient("k", max_retries=1, session=session, credit_hook=gastos.append)
-
-        assert client.extract({}, "LATAM") == LATAM_PAYLOAD
-        assert len(gastos) == 2
-
-    def test_4xx_nao_faz_retry(self, settings):
+    def test_4xx_nao_faz_retry(self):
         session = Mock()
         session.post.return_value = fake_response(status_code=401, text="unauthorized")
         client = GeckoClient("k", max_retries=3, session=session)
-
-        with pytest.raises(GeckoAPIHTTPError) as excinfo:
-            client.extract({}, "LATAM")
-        assert excinfo.value.status_code == 401
+        with pytest.raises(GeckoAPIHTTPError) as exc:
+            client.extract({}, "KAYAK")
+        assert exc.value.status_code == 401
         assert session.post.call_count == 1
 
-    def test_timeout_esgota_as_tentativas(self, settings):
+    def test_timeout_esgota_as_tentativas(self):
         session = Mock()
         session.post.side_effect = requests.Timeout("estourou")
-        client = GeckoClient("k", max_retries=2, session=session)
-
+        client = GeckoClient("k", max_retries=2, retry_delay_seconds=0, session=session)
         with pytest.raises(GeckoAPITimeout):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert session.post.call_count == 3
 
-    def test_erro_de_conexao_nao_debita_credito(self, settings):
+    def test_erro_de_conexao_nao_debita_credito(self):
         session = Mock()
         session.post.side_effect = requests.ConnectionError("sem rede")
         gastos = []
-        client = GeckoClient("k", max_retries=1, session=session, credit_hook=gastos.append)
-
-        with pytest.raises(Exception):
-            client.extract({}, "LATAM")
+        client = GeckoClient("k", max_retries=1, retry_delay_seconds=0,
+                             session=session, credit_hook=gastos.append)
+        with pytest.raises(GeckoAPIError):
+            client.extract({}, "KAYAK")
         assert gastos == []
 
-    def test_budget_guard_bloqueia_antes_de_chamar(self, settings):
+    def test_budget_guard_bloqueia_antes_de_chamar(self):
         session = Mock()
         client = GeckoClient("k", session=session, budget_guard=lambda: False)
-
-        with pytest.raises(Exception, match="Sem creditos"):
-            client.extract({}, "LATAM")
+        with pytest.raises(GeckoAPIError, match="Sem creditos"):
+            client.extract({}, "KAYAK")
         session.post.assert_not_called()
 
-    def test_json_invalido_levanta_parse_error(self, settings):
+    def test_json_invalido_levanta_parse_error(self):
         response = fake_response(text="<html>erro</html>")
         response.json.side_effect = ValueError("nao e json")
         session = Mock()
         session.post.return_value = response
-        client = GeckoClient("k", session=session)
-
         with pytest.raises(GeckoAPIParseError, match="nao e JSON valido"):
-            client.extract({}, "LATAM")
-
-
-class TestFetchers:
-    def test_fetch_latam_ponta_a_ponta(self, settings):
-        session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
-        offer = fetch_latam(GeckoClient("k", session=session), settings)
-        assert offer.airline == "LATAM"
-        assert offer.price == pytest.approx(1395.75)
-
-    def test_fetch_azul_ponta_a_ponta(self, settings):
-        session = Mock()
-        session.post.return_value = fake_response(json_data=AZUL_PAYLOAD)
-        offer = fetch_azul(GeckoClient("k", session=session), settings)
-        assert offer.airline == "AZUL"
-        assert offer.price == pytest.approx(1346.0)
-
-
-class TestParseErrorCarregaPayload:
-    """Sem o payload anexado, o credito gasto vira prejuizo total."""
-
-    def test_latam_sem_data(self, settings):
-        payload = {"requestId": "x"}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_latam(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_latam_items_vazio(self, settings):
-        payload = {"data": {"items": []}}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_latam(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_latam_sem_voo_da_origem(self, settings):
-        payload = {"data": {"success": True, "items": [LATAM_PAYLOAD["data"]["items"][2]]}}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_latam(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_azul_sem_data(self, settings):
-        payload = {"requestId": "x"}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_azul(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_azul_trips_vazio(self, settings):
-        payload = {"data": {"trips": []}}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_azul(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_azul_sem_tarifa(self, settings):
-        payload = {"data": {"trips": [{"origin": "BEL", "journeys": []}]}}
-        with pytest.raises(GeckoAPIParseError) as exc:
-            parse_azul(payload, settings)
-        assert exc.value.payload is payload
-
-    def test_payload_e_opcional(self):
-        assert GeckoAPIParseError("erro sem payload").payload is None
+            GeckoClient("k", session=session).extract({}, "KAYAK")
 
 
 class TestRetryConscienteDeCusto:
@@ -504,34 +398,30 @@ class TestRetryConscienteDeCusto:
         session = Mock()
         session.post.side_effect = [
             fake_response(status_code=504, text="UPSTREAM_TIMEOUT"),
-            fake_response(json_data=LATAM_PAYLOAD),
+            fake_response(json_data=KAYAK_PAYLOAD),
         ]
         pausas = []
-        client = GeckoClient(
-            "k", max_retries=1, retry_delay_seconds=60,
-            session=session, sleep_fn=pausas.append,
-        )
-        client.extract({}, "LATAM")
+        client = GeckoClient("k", max_retries=1, retry_delay_seconds=60,
+                             session=session, sleep_fn=pausas.append)
+        client.extract({}, "KAYAK")
         assert pausas == [60], "retry imediato encontra a mesma lentidao e queima credito"
 
     def test_nao_pausa_antes_da_primeira_tentativa(self):
         session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
         pausas = []
-        client = GeckoClient("k", retry_delay_seconds=60, session=session, sleep_fn=pausas.append)
-        client.extract({}, "LATAM")
+        GeckoClient("k", retry_delay_seconds=60, session=session,
+                    sleep_fn=pausas.append).extract({}, "KAYAK")
         assert pausas == []
 
-    def test_504_custa_no_maximo_dois_creditos_de_tentativa(self):
+    def test_504_custa_no_maximo_duas_tentativas(self):
         session = Mock()
         session.post.return_value = fake_response(status_code=504, text="UPSTREAM_TIMEOUT")
         gastos = []
-        client = GeckoClient(
-            "k", max_retries=1, retry_delay_seconds=0,
-            session=session, credit_hook=gastos.append, sleep_fn=lambda _s: None,
-        )
+        client = GeckoClient("k", max_retries=1, retry_delay_seconds=0,
+                             session=session, credit_hook=gastos.append)
         with pytest.raises(GeckoAPIHTTPError):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert len(gastos) == 2
         assert session.post.call_count == 2
 
@@ -542,14 +432,12 @@ class TestRetryConscienteDeCusto:
 
         def guard():
             chamadas["n"] += 1
-            return chamadas["n"] <= 1  # libera so a primeira tentativa
+            return chamadas["n"] <= 1
 
-        client = GeckoClient(
-            "k", max_retries=3, retry_delay_seconds=0,
-            session=session, budget_guard=guard, sleep_fn=lambda _s: None,
-        )
+        client = GeckoClient("k", max_retries=3, retry_delay_seconds=0,
+                             session=session, budget_guard=guard)
         with pytest.raises(GeckoAPIError, match="Sem creditos"):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert session.post.call_count == 1
 
 
@@ -558,23 +446,19 @@ class TestEstornoDe5xx:
         session = Mock()
         session.post.return_value = fake_response(status_code=504, text="UPSTREAM_TIMEOUT")
         debitos, estornos = [], []
-        client = GeckoClient(
-            "k", max_retries=1, retry_delay_seconds=0, session=session,
-            credit_hook=debitos.append, refund_hook=estornos.append,
-        )
+        client = GeckoClient("k", max_retries=1, retry_delay_seconds=0, session=session,
+                             credit_hook=debitos.append, refund_hook=estornos.append)
         with pytest.raises(GeckoAPIHTTPError):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert len(debitos) == 2
         assert len(estornos) == 2, "liquido zero: a GeckoAPI devolve o que nao entregou"
 
     def test_sucesso_nao_estorna(self):
         session = Mock()
-        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
         debitos, estornos = [], []
-        client = GeckoClient(
-            "k", session=session, credit_hook=debitos.append, refund_hook=estornos.append
-        )
-        client.extract({}, "LATAM")
+        GeckoClient("k", session=session, credit_hook=debitos.append,
+                    refund_hook=estornos.append).extract({}, "KAYAK")
         assert len(debitos) == 1
         assert estornos == []
 
@@ -585,7 +469,7 @@ class TestEstornoDe5xx:
         estornos = []
         client = GeckoClient("k", session=session, refund_hook=estornos.append)
         with pytest.raises(GeckoAPIHTTPError):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert estornos == []
 
     def test_timeout_do_cliente_nao_estorna(self):
@@ -593,63 +477,19 @@ class TestEstornoDe5xx:
         session = Mock()
         session.post.side_effect = requests.Timeout("estourou")
         debitos, estornos = [], []
-        client = GeckoClient(
-            "k", max_retries=0, retry_delay_seconds=0, session=session,
-            credit_hook=debitos.append, refund_hook=estornos.append,
-        )
+        client = GeckoClient("k", max_retries=0, session=session,
+                             credit_hook=debitos.append, refund_hook=estornos.append)
         with pytest.raises(GeckoAPITimeout):
-            client.extract({}, "LATAM")
+            client.extract({}, "KAYAK")
         assert len(debitos) == 1
         assert estornos == []
 
 
-class TestDuracaoCalculadaPelosHorarios:
-    """A Azul mandou `duration` num formato nao reconhecido; os horarios salvam."""
-
-    @pytest.mark.parametrize(
-        "saida,chegada,esperado",
-        [
-            ("2026-12-27T09:00:00", "2026-12-27T14:20:00", 320),
-            ("2026-12-27T09:00:00.000Z", "2026-12-27T12:40:00.000Z", 220),
-            ("2026-12-27T22:10:00", "2026-12-28T01:20:00", 190),  # vira o dia
-            ("2026-12-27T09:00:00-03:00", "2026-12-27T14:20:00-03:00", 320),
-            (None, "2026-12-27T14:20:00", None),
-            ("2026-12-27T09:00:00", None, None),
-            ("nao e data", "2026-12-27T14:20:00", None),
-            ("2026-12-27T14:20:00", "2026-12-27T09:00:00", None),  # chegada antes da saida
-            ("2026-12-27T09:00:00", "2026-12-27T09:00:00", None),  # duracao zero
-        ],
-    )
-    def test_calcula_a_partir_dos_horarios(self, saida, chegada, esperado):
-        from src.fetch_prices import duration_from_timestamps
-
-        assert duration_from_timestamps(saida, chegada) == esperado
-
-    def test_fusos_incompativeis_nao_quebram(self):
-        from src.fetch_prices import duration_from_timestamps
-
-        assert duration_from_timestamps("2026-12-27T09:00:00", "2026-12-27T14:20:00Z") is None
-
-    def test_azul_com_duration_ilegivel_usa_os_horarios(self, settings):
-        journey = azul_journey(
-            "BEL", "NAT", "2026-12-27T09:00:00", "2026-12-27T14:20:00", "5h20", 1, 700.0
-        )
-        payload = {"data": {"currency": "BRL", "trips": [{"origin": "BEL", "journeys": [journey]}]}}
-        offer = parse_azul(payload, settings)
-        assert offer.outbound.duration_minutes == 320
-        assert offer.outbound.duration_label == "5h20min"
-
-    def test_duration_valida_tem_prioridade_sobre_o_calculo(self, settings):
-        """Se a API informa a duracao, ela manda - pode haver escala nao refletida."""
-        journey = azul_journey(
-            "BEL", "NAT", "2026-12-27T09:00:00", "2026-12-27T14:20:00", "PT4H", 1, 700.0
-        )
-        payload = {"data": {"currency": "BRL", "trips": [{"origin": "BEL", "journeys": [journey]}]}}
-        assert parse_azul(payload, settings).outbound.duration_minutes == 240
-
-    def test_latam_tambem_tem_o_fallback(self, settings):
-        item = latam_item(
-            "BEL", "NAT", "2026-12-27T08:15:00.000Z", "2026-12-27T12:40:00.000Z", None, 1, 500.0
-        )
-        offer = parse_latam({"data": {"success": True, "items": [item]}}, settings)
-        assert offer.outbound.duration_minutes == 265
+class TestFetchKayak:
+    def test_ponta_a_ponta(self, settings):
+        session = Mock()
+        session.post.return_value = fake_response(json_data=KAYAK_PAYLOAD)
+        offer = fetch_kayak(GeckoClient("k", session=session), settings)
+        assert offer.price == pytest.approx(1180.00)
+        assert offer.airline == "GOL"
+        assert offer.provider == "123Milhas"
