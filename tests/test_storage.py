@@ -143,3 +143,34 @@ class TestSelecaoDeConexao:
         conn = storage.connect(":memory:", remote_url=str(tmp_path / "r.db"))
         assert isinstance(conn, storage._RemoteConnection)
         conn.close()
+
+
+class TestFailedExtractions:
+    """O payload que o parser nao entendeu precisa sobreviver: o credito ja foi gasto."""
+
+    def test_salva_e_recupera_o_payload(self, conn):
+        payload = {"data": {"formato": "inesperado"}}
+        rid = storage.save_failed_extraction(conn, "LATAM", "items ausente", payload)
+        assert rid == 1
+        assert storage.get_failed_extraction(conn, rid) == payload
+
+    def test_recuperar_id_inexistente_devolve_none(self, conn):
+        assert storage.get_failed_extraction(conn, 999) is None
+
+    def test_nao_propaga_excecao_se_o_insert_falhar(self, conn):
+        """Nunca pode virar um segundo ponto de quebra no pipeline."""
+        conn.execute("DROP TABLE failed_extractions")
+        conn.commit()
+        assert storage.save_failed_extraction(conn, "AZUL", "erro", {"a": 1}) is None
+
+    def test_serializa_valores_nao_json(self, conn):
+        import datetime as dt
+
+        rid = storage.save_failed_extraction(
+            conn, "AZUL", "erro", {"quando": dt.datetime(2026, 7, 24)}
+        )
+        assert storage.get_failed_extraction(conn, rid)["quando"].startswith("2026-07-24")
+
+    def test_funciona_no_libsql(self, libsql_conn):
+        rid = storage.save_failed_extraction(libsql_conn, "LATAM", "erro", {"x": [1, 2]})
+        assert storage.get_failed_extraction(libsql_conn, rid) == {"x": [1, 2]}

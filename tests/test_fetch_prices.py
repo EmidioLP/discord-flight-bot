@@ -448,3 +448,46 @@ class TestFetchers:
         offer = fetch_azul(GeckoClient("k", session=session), settings)
         assert offer.airline == "AZUL"
         assert offer.price == pytest.approx(1346.0)
+
+
+class TestParseErrorCarregaPayload:
+    """Sem o payload anexado, o credito gasto vira prejuizo total."""
+
+    def test_latam_sem_data(self, settings):
+        payload = {"requestId": "x"}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_latam(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_latam_items_vazio(self, settings):
+        payload = {"data": {"items": []}}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_latam(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_latam_sem_voo_da_origem(self, settings):
+        payload = {"data": {"success": True, "items": [LATAM_PAYLOAD["data"]["items"][2]]}}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_latam(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_azul_sem_data(self, settings):
+        payload = {"requestId": "x"}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_azul(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_azul_trips_vazio(self, settings):
+        payload = {"data": {"trips": []}}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_azul(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_azul_sem_tarifa(self, settings):
+        payload = {"data": {"trips": [{"origin": "BEL", "journeys": []}]}}
+        with pytest.raises(GeckoAPIParseError) as exc:
+            parse_azul(payload, settings)
+        assert exc.value.payload is payload
+
+    def test_payload_e_opcional(self):
+        assert GeckoAPIParseError("erro sem payload").payload is None

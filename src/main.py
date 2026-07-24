@@ -17,6 +17,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ from .storage import DBConnection
 from .config import AIRLINES, ConfigError, Settings, load_settings, setup_logging
 from .credits_tracker import CreditBudgetExceeded, CreditsTracker
 from .discord_bot import DiscordError, notify_error, notify_offer
-from .fetch_prices import FETCHERS, GeckoAPIError, GeckoClient
+from .fetch_prices import FETCHERS, GeckoAPIError, GeckoAPIParseError, GeckoClient
 from .models import Leg, Offer
 
 logger = logging.getLogger("main")
@@ -91,6 +92,20 @@ def _check_airline(
 
     try:
         offer = FETCHERS[airline](client, settings)
+    except GeckoAPIParseError as exc:
+        # O credito ja foi cobrado e a resposta veio: o payload e a unica coisa
+        # aproveitavel que sobrou. Salvamos no banco e no log para corrigir o
+        # parser depois sem precisar gastar credito de novo.
+        logger.error("Parser da %s nao entendeu a resposta: %s", airline, exc)
+        if exc.payload is not None:
+            storage.save_failed_extraction(conn, airline, str(exc), exc.payload)
+            logger.error(
+                "Resposta bruta da %s (para corrigir o parser):\n%s",
+                airline,
+                json.dumps(exc.payload, ensure_ascii=False)[:20000],
+            )
+        notify_error(settings.discord_webhook_url, airline, exc, settings.route_label)
+        return 0
     except GeckoAPIError as exc:
         logger.error("Falha na consulta da %s: %s", airline, exc)
         notify_error(settings.discord_webhook_url, airline, exc, settings.route_label)

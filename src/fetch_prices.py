@@ -53,7 +53,16 @@ class GeckoAPIHTTPError(GeckoAPIError):
 
 
 class GeckoAPIParseError(GeckoAPIError):
-    """A resposta veio, mas nao tem o formato esperado."""
+    """A resposta veio, mas nao tem o formato esperado.
+
+    Carrega o payload junto: o credito ja foi cobrado, entao a resposta bruta
+    e a unica coisa de valor que sobrou da chamada, e e o que permite corrigir
+    o parser sem gastar credito de novo.
+    """
+
+    def __init__(self, message: str, payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload
 
 
 # --------------------------------------------------------------------------
@@ -323,21 +332,22 @@ def parse_latam(payload: dict[str, Any], settings: Settings) -> Offer:
     """
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise GeckoAPIParseError("LATAM: resposta sem o objeto 'data'")
+        raise GeckoAPIParseError("LATAM: resposta sem o objeto 'data'", payload)
 
     if data.get("success") is False:
-        raise GeckoAPIParseError("LATAM: a API marcou a extracao como success=false")
+        raise GeckoAPIParseError("LATAM: a API marcou a extracao como success=false", payload)
 
     items = data.get("items")
     if not isinstance(items, list) or not items:
-        raise GeckoAPIParseError("LATAM: 'data.items' vazio ou ausente")
+        raise GeckoAPIParseError("LATAM: 'data.items' vazio ou ausente", payload)
 
     outbound_item, outbound_price = _cheapest_latam_item(items, settings.origin)
     inbound_item, inbound_price = _cheapest_latam_item(items, settings.destination)
 
     if outbound_item is None:
         raise GeckoAPIParseError(
-            f"LATAM: nenhum voo saindo de {settings.origin} em {len(items)} itens"
+            f"LATAM: nenhum voo saindo de {settings.origin} em {len(items)} itens",
+            payload,
         )
 
     outbound = _latam_item_to_leg(outbound_item)
@@ -353,7 +363,7 @@ def parse_latam(payload: dict[str, Any], settings: Settings) -> Offer:
         total = (outbound_price or 0.0) + inbound_price
 
     if total <= 0:
-        raise GeckoAPIParseError("LATAM: nao encontrei preco valido nos itens")
+        raise GeckoAPIParseError("LATAM: nao encontrei preco valido nos itens", payload)
 
     currency = str(_dig(outbound_item, "price", "currency") or settings.currency)
 
@@ -438,7 +448,7 @@ def parse_azul(payload: dict[str, Any], settings: Settings) -> Offer:
     """
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise GeckoAPIParseError("Azul: resposta sem o objeto 'data'")
+        raise GeckoAPIParseError("Azul: resposta sem o objeto 'data'", payload)
 
     trips = data.get("trips")
     if not isinstance(trips, list) or not trips:
@@ -446,7 +456,9 @@ def parse_azul(payload: dict[str, Any], settings: Settings) -> Offer:
         detail = "; ".join(
             str(n.get("message")) for n in notifications if isinstance(n, dict) and n.get("message")
         )
-        raise GeckoAPIParseError(f"Azul: 'data.trips' vazio ou ausente. {detail}".strip())
+        raise GeckoAPIParseError(
+            f"Azul: 'data.trips' vazio ou ausente. {detail}".strip(), payload
+        )
 
     outbound_trip = _find_azul_trip(trips, settings.origin)
     inbound_trip = _find_azul_trip(trips, settings.destination)
@@ -458,11 +470,11 @@ def parse_azul(payload: dict[str, Any], settings: Settings) -> Offer:
         inbound_trip = trips[1] if len(trips) > 1 and isinstance(trips[1], dict) else None
 
     if outbound_trip is None:
-        raise GeckoAPIParseError("Azul: nao consegui identificar o trecho de ida")
+        raise GeckoAPIParseError("Azul: nao consegui identificar o trecho de ida", payload)
 
     outbound_journey, outbound_price, currency = _cheapest_azul_journey(outbound_trip)
     if outbound_journey is None or outbound_price is None:
-        raise GeckoAPIParseError("Azul: nenhuma journey de ida com tarifa disponivel")
+        raise GeckoAPIParseError("Azul: nenhuma journey de ida com tarifa disponivel", payload)
 
     inbound_journey = inbound_price = None
     if inbound_trip is not None:

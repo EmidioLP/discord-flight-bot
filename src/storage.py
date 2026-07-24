@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS credit_usage (
 
 CREATE INDEX IF NOT EXISTS idx_credit_usage_year_month
     ON credit_usage (year_month);
+
+-- Respostas que a API devolveu mas o parser nao entendeu. O credito ja foi
+-- cobrado nesse ponto, entao guardar o payload e o que permite corrigir o
+-- parser depois sem gastar credito de novo.
+CREATE TABLE IF NOT EXISTS failed_extractions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at   TEXT NOT NULL,
+    airline      TEXT NOT NULL,
+    error        TEXT NOT NULL,
+    raw_response TEXT NOT NULL
+);
 """
 
 
@@ -271,6 +282,46 @@ def save_offer(conn: DBConnection, offer: Offer) -> int:
         "Oferta salva | id=%s | %s | %.2f %s", row_id, offer.airline, offer.price, offer.currency
     )
     return row_id
+
+
+def save_failed_extraction(
+    conn: DBConnection, airline: str, error: str, payload: Any
+) -> int | None:
+    """Guarda a resposta que o parser nao entendeu.
+
+    Nunca propaga excecao: se ate isso falhar, o pipeline segue - o objetivo e
+    salvar o que der, nao criar um segundo ponto de quebra.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO failed_extractions (checked_at, airline, error, raw_response)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                airline,
+                error,
+                json.dumps(payload, ensure_ascii=False, default=str),
+            ),
+        )
+        conn.commit()
+        row_id = int(cursor.lastrowid or 0)
+        logger.info("Resposta bruta da %s salva em failed_extractions | id=%s", airline, row_id)
+        return row_id
+    except Exception:  # noqa: BLE001
+        logger.exception("Nao consegui salvar a resposta bruta da %s", airline)
+        return None
+
+
+def get_failed_extraction(conn: DBConnection, extraction_id: int) -> dict[str, Any] | None:
+    """Recupera um payload que falhou, para depurar o parser."""
+    row = conn.execute(
+        "SELECT raw_response FROM failed_extractions WHERE id = ?", (extraction_id,)
+    ).fetchone()
+    return None if row is None else json.loads(row["raw_response"])
 
 
 def get_history(
