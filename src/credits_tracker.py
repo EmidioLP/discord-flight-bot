@@ -141,6 +141,56 @@ class CreditsTracker:
         )
         return total
 
+    def reconcile(self, saldo_real: int, reason: str = "saldo da GeckoAPI") -> int:
+        """Alinha o ledger ao saldo informado por GET /v1/me/credits.
+
+        O ledger local conta por tentativa despachada e erra para cima: retry,
+        estorno nao registrado, execucao morta no meio. Quando a GeckoAPI diz o
+        saldo real, ele vira a verdade e a diferenca entra como um lancamento
+        de ajuste - positivo se gastamos mais do que o ledger sabia, negativo se
+        menos.
+
+        Devolve o consumo do mes depois do ajuste.
+        """
+        usado_real = self.monthly_budget - saldo_real
+        if usado_real < 0:
+            # Saldo maior que o orcamento (plano pago, bonus). Nada a corrigir:
+            # o orcamento mensal e nosso teto proprio, nao o da conta.
+            logger.info(
+                "Saldo real (%s) maior que o orcamento (%s); nao ha o que reconciliar",
+                saldo_real,
+                self.monthly_budget,
+            )
+            usado_real = 0
+
+        diferenca = usado_real - self.used_this_month()
+        if diferenca == 0:
+            logger.info("Ledger ja batia com o saldo real (%s creditos).", saldo_real)
+            return usado_real
+
+        now = self._now()
+        self.conn.execute(
+            """
+            INSERT INTO credit_usage (year_month, credits, reason, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                current_year_month(now),
+                diferenca,
+                f"ajuste ({reason}): saldo real {saldo_real}",
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+        self.conn.commit()
+        logger.info(
+            "Ledger reconciliado | ajuste de %+d | usados no mes: %s/%s (saldo real %s)",
+            diferenca,
+            usado_real,
+            self.monthly_budget,
+            saldo_real,
+        )
+        return usado_real
+
     def ensure_budget(self, credits: int, reason: str = "") -> None:
         """Levanta CreditBudgetExceeded se o gasto nao couber no orcamento."""
         if not self.can_spend(credits):

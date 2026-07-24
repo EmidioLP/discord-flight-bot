@@ -9,6 +9,7 @@ import sqlite3
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from src import storage
 from src.compare import build_comparison
@@ -18,10 +19,24 @@ from src.models import Leg, Offer
 
 from test_fetch_prices import KAYAK_PAYLOAD
 
+SALDO = {
+    "userId": "user-1",
+    "currentCredits": 100,
+    "planId": "free",
+    "creditsConsumed": {"last24Hours": 5, "last7Days": 5, "last30Days": 5},
+}
+
 
 def fake_post(url, json=None, **kwargs):
     resposta = Mock(status_code=200, text="ok")
     resposta.json.return_value = {} if "discord" in str(url) else KAYAK_PAYLOAD
+    return resposta
+
+
+def fake_get(url, **kwargs):
+    """GET /v1/me/credits. Sem isto o run_check sai para a internet de verdade."""
+    resposta = Mock(status_code=200, text="ok")
+    resposta.json.return_value = SALDO
     return resposta
 
 
@@ -34,6 +49,9 @@ class TestRunCheck:
         with patch(
             "src.fetch_prices.requests.Session.post",
             side_effect=lambda *a, **k: fake_post(a[0] if a else k.get("url"), **k),
+        ), patch(
+            "src.fetch_prices.requests.Session.get",
+            side_effect=lambda *a, **k: fake_get(a[0] if a else k.get("url"), **k),
         ), patch("src.discord_bot.requests.post", side_effect=discord_post):
             return run_check(settings, conn)
 
@@ -53,7 +71,11 @@ class TestRunCheck:
         assert row["seats_remaining"] == 2
 
     def test_gasta_cinco_creditos(self, settings, conn):
-        """Uma request ao KAYAK, nao duas por companhia."""
+        """Uma request ao KAYAK, nao duas por companhia.
+
+        O saldo mockado esta cheio (100), entao a reconciliacao nao lanca
+        ajuste e o total do ledger e so o custo da request.
+        """
         self._rodar(settings, conn, [])
         total = conn.execute("SELECT SUM(credits) AS t FROM credit_usage").fetchone()["t"]
         assert total == 5
@@ -81,13 +103,44 @@ class TestRunCheck:
         )
         conn.commit()
         enviados = []
+        saldo_zerado = Mock(status_code=200, text="ok")
+        saldo_zerado.json.return_value = {"currentCredits": 0, "planId": "free"}
         with patch("src.fetch_prices.requests.Session.post") as post_mock, patch(
+            "src.fetch_prices.requests.Session.get", return_value=saldo_zerado
+        ), patch(
             "src.discord_bot.requests.post",
             side_effect=lambda url, json=None, **k: (enviados.append(json), Mock(status_code=204, text=""))[1],
         ):
             assert run_check(settings, conn) == 0
         post_mock.assert_not_called()
         assert len(enviados) == 1, "avisa o estouro no Discord"
+
+    def test_reconcilia_o_ledger_com_o_saldo_real(self, settings, conn):
+        """Ledger inflado por retries nao pode recusar checagem que cabia."""
+        conn.execute(
+            "INSERT INTO credit_usage (year_month, credits, reason, recorded_at)"
+            " VALUES (strftime('%Y-%m','now'), 90, 'inflado por retries', 'x')"
+        )
+        conn.commit()
+        # A GeckoAPI diz que o saldo esta cheio: os 90 do ledger eram inflacao.
+        assert self._rodar(settings, conn, []) == 1
+
+    def test_saldo_indisponivel_nao_derruba_a_checagem(self, settings, conn):
+        """Sem o saldo real, seguimos com o ledger local (que erra para cima)."""
+        enviados = []
+
+        def discord_post(url, json=None, **kwargs):
+            enviados.append(json)
+            return Mock(status_code=204, text="")
+
+        with patch(
+            "src.fetch_prices.requests.Session.post",
+            side_effect=lambda *a, **k: fake_post(a[0] if a else k.get("url"), **k),
+        ), patch(
+            "src.fetch_prices.requests.Session.get", side_effect=requests.Timeout("sem saldo")
+        ), patch("src.discord_bot.requests.post", side_effect=discord_post):
+            assert run_check(settings, conn) == 1
+        assert len(enviados) == 1
 
 
 class TestEmbed:

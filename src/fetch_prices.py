@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
@@ -38,7 +39,9 @@ from .models import Leg, Offer
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://api.geckoapi.com.br/v1/extract"
+API_BASE = "https://api.geckoapi.com.br/v1"
+API_URL = f"{API_BASE}/extract"
+CREDITS_URL = f"{API_BASE}/me/credits"
 
 TARGET_KAYAK = "kayak.com.br"
 EXTRACT_TYPE = "plp"
@@ -72,6 +75,24 @@ class GeckoAPIParseError(GeckoAPIError):
     def __init__(self, message: str, payload: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.payload = payload
+
+
+@dataclass(frozen=True)
+class CreditBalance:
+    """Resposta de GET /v1/me/credits: o saldo real da conta.
+
+    E a fonte de verdade sobre creditos. O ledger local continua existindo como
+    trilha de auditoria e como protecao quando este endpoint nao responde, mas
+    quem manda no go/no-go e este numero.
+    """
+
+    current_credits: int
+    plan_id: str | None = None
+    last_24h: int | None = None
+    last_7d: int | None = None
+    last_30d: int | None = None
+    updated_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 # --------------------------------------------------------------------------
@@ -234,6 +255,66 @@ class GeckoClient:
         self.budget_guard = budget_guard or (lambda: True)
         self.session = session or requests.Session()
         self._sleep = sleep_fn or time.sleep
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    def get_credits(self) -> CreditBalance:
+        """Consulta GET /v1/me/credits: o saldo real da conta.
+
+        Sem retry e sem `credit_hook`: e endpoint de conta, nao despacha
+        extracao. Se um dia se confirmar que cobra, e so plugar o hook aqui.
+        """
+        try:
+            response = self.session.get(
+                CREDITS_URL, headers=self._headers(), timeout=self.timeout
+            )
+        except requests.Timeout as exc:
+            raise GeckoAPITimeout(f"Timeout ao consultar saldo: {exc}") from exc
+        except requests.RequestException as exc:
+            raise GeckoAPIError(f"Erro de conexao ao consultar saldo: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise GeckoAPIHTTPError(response.status_code, response.text)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GeckoAPIParseError(
+                f"Saldo: resposta nao e JSON valido ({response.text[:200]!r})"
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise GeckoAPIParseError(f"Saldo: esperava objeto JSON, veio {type(payload)}")
+
+        saldo = _as_int(payload.get("currentCredits"))
+        if saldo is None:
+            raise GeckoAPIParseError(
+                f"Saldo: 'currentCredits' ausente ou nao numerico em {list(payload)}",
+                payload,
+            )
+
+        consumido = payload.get("creditsConsumed") or {}
+        balance = CreditBalance(
+            current_credits=saldo,
+            plan_id=str(payload.get("planId") or "") or None,
+            last_24h=_as_int(consumido.get("last24Hours")),
+            last_7d=_as_int(consumido.get("last7Days")),
+            last_30d=_as_int(consumido.get("last30Days")),
+            updated_at=str(payload.get("updatedAt") or "") or None,
+            raw=payload,
+        )
+        logger.info(
+            "Saldo GeckoAPI | %s creditos | plano %s | 30d: %s",
+            balance.current_credits,
+            balance.plan_id,
+            balance.last_30d,
+        )
+        return balance
 
     def extract(self, body: dict[str, Any], label: str) -> dict[str, Any]:
         """Executa POST /v1/extract e devolve o JSON, com retry em falha transitoria."""

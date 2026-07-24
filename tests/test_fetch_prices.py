@@ -493,3 +493,77 @@ class TestFetchKayak:
         assert offer.price == pytest.approx(1180.00)
         assert offer.airline == "GOL"
         assert offer.provider == "123Milhas"
+
+
+class TestConsultaDeSaldo:
+    """GET /v1/me/credits - endpoint de conta, nao despacha extracao."""
+
+    SALDO = {
+        "userId": "user-1",
+        "currentCredits": 95,
+        "planId": "free",
+        "updatedAt": "2026-07-24T12:00:00.000Z",
+        "creditsConsumed": {"last24Hours": 5, "last7Days": 15, "last30Days": 55},
+    }
+
+    def _client(self, resposta):
+        session = Mock()
+        session.get.return_value = resposta
+        return GeckoClient("k", session=session), session
+
+    def test_le_todos_os_campos(self):
+        client, _ = self._client(fake_response(json_data=self.SALDO))
+        saldo = client.get_credits()
+        assert saldo.current_credits == 95
+        assert saldo.plan_id == "free"
+        assert saldo.last_24h == 5
+        assert saldo.last_7d == 15
+        assert saldo.last_30d == 55
+        assert saldo.updated_at == "2026-07-24T12:00:00.000Z"
+
+    def test_usa_get_no_endpoint_certo(self):
+        client, session = self._client(fake_response(json_data=self.SALDO))
+        client.get_credits()
+        assert session.get.call_args.args[0] == "https://api.geckoapi.com.br/v1/me/credits"
+        assert session.get.call_args.kwargs["headers"]["Authorization"] == "Bearer k"
+
+    def test_nao_debita_credito(self):
+        """Endpoint de conta; se um dia se confirmar que cobra, plugamos o hook."""
+        session = Mock()
+        session.get.return_value = fake_response(json_data=self.SALDO)
+        gastos = []
+        GeckoClient("k", session=session, credit_hook=gastos.append).get_credits()
+        assert gastos == []
+
+    def test_campos_de_consumo_ausentes_nao_quebram(self):
+        client, _ = self._client(fake_response(json_data={"currentCredits": 40}))
+        saldo = client.get_credits()
+        assert saldo.current_credits == 40
+        assert saldo.last_24h is None
+        assert saldo.plan_id is None
+
+    def test_sem_currentCredits_levanta_com_payload(self):
+        payload = {"userId": "x", "planId": "free"}
+        client, _ = self._client(fake_response(json_data=payload))
+        with pytest.raises(GeckoAPIParseError, match="currentCredits") as exc:
+            client.get_credits()
+        assert exc.value.payload == payload
+
+    def test_401_levanta_http_error(self):
+        client, _ = self._client(fake_response(status_code=401, text="unauthorized"))
+        with pytest.raises(GeckoAPIHTTPError):
+            client.get_credits()
+
+    def test_timeout_levanta(self):
+        session = Mock()
+        session.get.side_effect = requests.Timeout("estourou")
+        with pytest.raises(GeckoAPITimeout):
+            GeckoClient("k", session=session).get_credits()
+
+    def test_nao_faz_retry(self):
+        """Consultar saldo nao e caro, mas repetir a toa tambem nao ajuda."""
+        session = Mock()
+        session.get.side_effect = requests.Timeout("estourou")
+        with pytest.raises(GeckoAPITimeout):
+            GeckoClient("k", max_retries=3, session=session).get_credits()
+        assert session.get.call_count == 1

@@ -235,3 +235,66 @@ class TestEstorno:
         assert tracker.can_spend(5) is False
         tracker.refund(10, "duas extracoes falhas")
         assert tracker.can_spend(5) is True
+
+
+class TestReconciliacao:
+    """GET /v1/me/credits e a verdade; o ledger local conta por tentativa."""
+
+    def test_corrige_contagem_inflada(self, conn, clock):
+        """Cenario real: 15 debitados na LATAM, mas a GeckoAPI so cobrou 5."""
+        tracker = make_tracker(conn, clock)
+        tracker.record(15, "LATAM com retry")
+        assert tracker.used_this_month() == 15
+
+        tracker.reconcile(saldo_real=95)  # 100 - 95 = 5 realmente gastos
+        assert tracker.used_this_month() == 5
+        assert tracker.remaining() == 95
+
+    def test_corrige_contagem_a_menos(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(5, "uma checagem")
+        tracker.reconcile(saldo_real=80)  # gastamos 20, nao 5
+        assert tracker.used_this_month() == 20
+
+    def test_sem_diferenca_nao_lanca_ajuste(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(20, "quatro checagens")
+        linhas_antes = conn.execute("SELECT COUNT(*) FROM credit_usage").fetchone()[0]
+        tracker.reconcile(saldo_real=80)
+        linhas_depois = conn.execute("SELECT COUNT(*) FROM credit_usage").fetchone()[0]
+        assert linhas_antes == linhas_depois
+
+    def test_ajuste_fica_rastreavel_no_ledger(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(15, "LATAM com retry")
+        tracker.reconcile(saldo_real=95)
+        ultima = conn.execute(
+            "SELECT credits, reason FROM credit_usage ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert ultima["credits"] == -10
+        assert "ajuste" in ultima["reason"]
+        assert "saldo real 95" in ultima["reason"]
+
+    def test_saldo_maior_que_o_orcamento_nao_vira_consumo_negativo(self, conn, clock):
+        """Plano pago ou bonus: o orcamento mensal e teto nosso, nao da conta."""
+        tracker = make_tracker(conn, clock)
+        tracker.reconcile(saldo_real=500)
+        assert tracker.used_this_month() == 0
+        assert tracker.remaining() == 100
+
+    def test_reconciliacao_libera_checagem_que_seria_recusada(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(100, "ledger inflado por retries")
+        assert tracker.can_spend(5) is False
+
+        tracker.reconcile(saldo_real=40)
+        assert tracker.can_spend(5) is True
+
+    def test_ajuste_pertence_ao_mes_corrente(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(50, "julho")
+        clock.set(2026, 8, 2)
+        tracker.reconcile(saldo_real=90)  # agosto: 10 gastos
+        assert tracker.used_this_month() == 10
+        total = conn.execute("SELECT SUM(credits) AS t FROM credit_usage").fetchone()["t"]
+        assert total == 60, "o consumo de julho continua no ledger"

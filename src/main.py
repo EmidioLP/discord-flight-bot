@@ -9,7 +9,8 @@ Fluxo de uma checagem:
 Uso:
     python -m src.main once        # roda uma checagem agora
     python -m src.main schedule    # deixa rodando periodicamente (APScheduler)
-    python -m src.main status      # mostra creditos e historico, sem gastar nada
+    python -m src.main status      # historico local, sem tocar na rede
+    python -m src.main credits     # saldo real na GeckoAPI e reconcilia o ledger
     python -m src.main dry-run     # testa o embed no Discord sem chamar a API
 """
 
@@ -42,7 +43,26 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
         settings.departure_date,
         settings.return_date,
     )
-    logger.info("Creditos no mes: %s", tracker.summary())
+    logger.info("Creditos no mes (ledger local): %s", tracker.summary())
+
+    # O saldo da GeckoAPI e a verdade; o ledger local conta por tentativa e
+    # erra para cima. Reconciliar antes de decidir evita recusar uma checagem
+    # que na verdade cabia.
+    client = GeckoClient(
+        api_key=settings.geckoapi_key,
+        timeout=settings.http_timeout_seconds,
+        max_retries=settings.http_max_retries,
+        retry_delay_seconds=settings.http_retry_delay_seconds,
+        credit_hook=lambda label: tracker.record(settings.credits_per_request, label),
+        refund_hook=lambda label: tracker.refund(settings.credits_per_request, label),
+    )
+    try:
+        saldo = client.get_credits()
+        tracker.reconcile(saldo.current_credits)
+    except GeckoAPIError as exc:
+        # Sem o saldo real seguimos com o ledger local, que erra para o lado
+        # seguro. Nao vale abortar a checagem por causa disso.
+        logger.warning("Nao consegui consultar o saldo real (%s); usando o ledger local.", exc)
 
     try:
         tracker.ensure_budget(settings.credits_per_full_check, "checagem")
@@ -69,15 +89,7 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
             return False
         return True
 
-    client = GeckoClient(
-        api_key=settings.geckoapi_key,
-        timeout=settings.http_timeout_seconds,
-        max_retries=settings.http_max_retries,
-        retry_delay_seconds=settings.http_retry_delay_seconds,
-        credit_hook=lambda label: tracker.record(settings.credits_per_request, label),
-        refund_hook=lambda label: tracker.refund(settings.credits_per_request, label),
-        budget_guard=budget_guard,
-    )
+    client.budget_guard = budget_guard
 
     try:
         offer = fetch_kayak(client, settings)
@@ -238,7 +250,48 @@ def cmd_dry_run(settings: Settings) -> int:
     return 0
 
 
+def cmd_credits(settings: Settings) -> int:
+    """Consulta o saldo real na GeckoAPI e reconcilia o ledger local.
+
+    Chama GET /v1/me/credits, que e endpoint de conta e nao despacha extracao.
+    Se voce rodar duas vezes seguidas e o saldo cair, e porque ele cobra - e ai
+    vale plugar o credit_hook em `GeckoClient.get_credits`.
+    """
+    client = GeckoClient(api_key=settings.geckoapi_key, timeout=settings.http_timeout_seconds)
+    try:
+        saldo = client.get_credits()
+    except GeckoAPIError as exc:
+        logger.error("Falha ao consultar o saldo: %s", exc)
+        return 1
+
+    print(f"\nSaldo atual:  {saldo.current_credits} creditos")
+    if saldo.plan_id:
+        print(f"Plano:        {saldo.plan_id}")
+    print("\nConsumo recente (pela GeckoAPI):")
+    for rotulo, valor in (
+        ("ultimas 24h", saldo.last_24h),
+        ("ultimos 7d ", saldo.last_7d),
+        ("ultimos 30d", saldo.last_30d),
+    ):
+        print(f"  {rotulo}: {valor if valor is not None else 'nao informado'}")
+
+    checagens = saldo.current_credits // settings.credits_per_full_check
+    print(f"\nDa para {checagens} checagens com o saldo atual.\n")
+
+    with _open_db(settings) as conn:
+        tracker = CreditsTracker(conn, monthly_budget=settings.monthly_credit_budget)
+        antes = tracker.used_this_month()
+        tracker.reconcile(saldo.current_credits)
+        depois = tracker.used_this_month()
+        if antes != depois:
+            print(f"Ledger local reconciliado: {antes} -> {depois} creditos usados no mes.\n")
+        else:
+            print("Ledger local ja batia com o saldo real.\n")
+    return 0
+
+
 COMMANDS = {
+    "credits": cmd_credits,
     "once": cmd_once,
     "schedule": cmd_schedule,
     "status": cmd_status,

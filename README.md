@@ -49,7 +49,15 @@ O `.env` esta no `.gitignore` e nao deve ser commitado.
 python -m src.main status
 ```
 
-Mostra creditos do mes e historico de precos. **Nao chama a API, nao gasta credito.**
+Historico de precos e consumo pelo ledger local. **Nao toca na rede.**
+
+```bash
+python -m src.main credits
+```
+
+Consulta `GET /v1/me/credits` na GeckoAPI: saldo real, consumo em 24h/7d/30d, e
+reconcilia o ledger local com esse numero. Endpoint de conta, nao despacha
+extracao.
 
 ```bash
 python -m src.main dry-run
@@ -213,6 +221,12 @@ Decisoes que valem registro:
 - **Creditos sao debitados por tentativa HTTP, nao por sucesso.** Um retry
   apos HTTP 500 debita os 5 creditos de novo, porque a API provavelmente
   cobrou. Erro de conexao (request nao chegou a sair) nao debita.
+- **O saldo da GeckoAPI e a verdade; o ledger local e a trilha.** Antes de cada
+  checagem, `GET /v1/me/credits` informa o saldo real e a diferenca entra como
+  lancamento de ajuste. O ledger conta por tentativa e erra para cima (retry,
+  estorno perdido, execucao morta no meio); sem reconciliar, ele acabaria
+  recusando checagens que ainda cabiam. Se o endpoint nao responder, seguimos
+  com o ledger local, que erra para o lado seguro.
 - **O ledger de creditos e chaveado por `YYYY-MM`.** O "reset todo dia 1"
   acontece sozinho na virada do mes, sem rotina de limpeza.
 - **Metabusca em vez de consultar cada companhia.** Uma request ao KAYAK cobre

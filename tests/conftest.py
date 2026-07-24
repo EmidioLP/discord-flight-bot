@@ -12,6 +12,26 @@ from src.config import Settings
 
 
 @pytest.fixture(autouse=True)
+def _sem_rede_real(monkeypatch):
+    """Nenhum teste pode sair para a internet.
+
+    Sentinela no nivel do adaptador: mocks de `Session.post`/`Session.get`
+    nunca chegam aqui, entao so uma chamada esquecida dispara. Foi exatamente
+    isso que aconteceu quando `run_check` passou a consultar o saldo em
+    GET /v1/me/credits e os testes so mockavam o POST - a suite comecou a
+    bater na GeckoAPI de verdade, e o unico sintoma era ficar mais lenta.
+    """
+
+    def _bloquear(self, request, *args, **kwargs):
+        raise RuntimeError(
+            f"Teste tentou chamada de rede real: {request.method} {request.url}. "
+            "Mocke a sessao (Session.post / Session.get) no teste."
+        )
+
+    monkeypatch.setattr("requests.adapters.HTTPAdapter.send", _bloquear)
+
+
+@pytest.fixture(autouse=True)
 def _sem_sleep_real(monkeypatch):
     """Nenhum teste pode dormir de verdade.
 
