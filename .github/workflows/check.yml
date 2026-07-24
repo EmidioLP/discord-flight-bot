@@ -24,15 +24,43 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Instalar dependencias
         run: pip install -e ".[turso]"
+
+      - name: Conferir secrets
+        # Falha cedo e dizendo QUAL secret falta. Sem isso o erro e um
+        # "exit code 2" mudo, que nao distingue nome errado de valor vazio.
+        # Imprime so presenca e tamanho - nunca o valor.
+        env:
+          GECKOAPI_KEY: ${{ secrets.GECKOAPI_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          faltando=0
+          for nome in GECKOAPI_KEY DISCORD_WEBHOOK_URL TURSO_DATABASE_URL TURSO_AUTH_TOKEN; do
+            valor="${!nome}"
+            if [ -z "$valor" ]; then
+              echo "FALTANDO -> $nome"
+              faltando=1
+            else
+              echo "ok       -> $nome (${#valor} caracteres)"
+            fi
+          done
+          if [ "$faltando" -eq 1 ]; then
+            echo
+            echo "Cadastre em Settings > Secrets and variables > Actions,"
+            echo "na aba 'Secrets' (nao 'Variables'), como 'New repository secret'"
+            echo "(nao 'New environment secret'). Os nomes sao case-sensitive."
+            exit 1
+          fi
 
       - name: Rodar checagem
         env:
