@@ -23,6 +23,36 @@ jobs:
       - name: Instalar dependencias
         run: pip install -e ".[turso]"
 
+      - name: Exigir os secrets do Turso
+        # Sem isto o job da falso positivo: secret ausente vira string vazia, e
+        # string vazia faz o codigo cair no SQLite local de propósito (e o que
+        # permite rodar na maquina sem Turso). O job entao criava um banco
+        # temporario no runner, passava em tudo e nao testava o Turso.
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          erro=0
+          for nome in TURSO_DATABASE_URL TURSO_AUTH_TOKEN; do
+            valor="${!nome}"
+            if [ -z "$valor" ]; then
+              echo "FALTANDO -> $nome"
+              erro=1
+            else
+              echo "ok       -> $nome (${#valor} caracteres)"
+            fi
+          done
+          if [ "$erro" -eq 1 ]; then
+            echo
+            echo "Sem estes secrets o teste rodaria em SQLite local e passaria"
+            echo "sem provar nada sobre o Turso. Abortando de proposito."
+            exit 1
+          fi
+          case "$TURSO_DATABASE_URL" in
+            libsql://*|https://*) ;;
+            *) echo "TURSO_DATABASE_URL nao comeca com libsql:// nem https://"; exit 1 ;;
+          esac
+
       - name: Conectar no Turso e imprimir status
         env:
           # De proposito sem GECKOAPI_KEY e sem DISCORD_WEBHOOK_URL: se algum
