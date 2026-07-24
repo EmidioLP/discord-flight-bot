@@ -192,3 +192,46 @@ class TestTetoPorExecucao:
             tracker.record(5, "tentativa")
             gastos += 5
         assert gastos == 20
+
+
+class TestEstorno:
+    """A GeckoAPI devolve creditos de extracoes que ela nao concluiu (HTTP 504)."""
+
+    def test_estorno_reduz_o_consumo(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(5, "LATAM tentativa 1")
+        tracker.refund(5, "LATAM tentativa 1, HTTP 504")
+        assert tracker.used_this_month() == 0
+        assert tracker.remaining() == 100
+
+    def test_ledger_continua_append_only(self, conn, clock):
+        """O debito e o estorno coexistem: o historico mostra os dois."""
+        tracker = make_tracker(conn, clock)
+        tracker.record(5, "LATAM")
+        tracker.refund(5, "HTTP 504")
+        linhas = conn.execute(
+            "SELECT credits, reason FROM credit_usage ORDER BY id"
+        ).fetchall()
+        assert [linha["credits"] for linha in linhas] == [5, -5]
+        assert linhas[1]["reason"].startswith("estorno:")
+
+    def test_cenario_real_uma_falha_e_um_sucesso(self, conn, clock):
+        """LATAM falhou com 504 e foi estornada; Azul funcionou. Liquido: 5."""
+        tracker = make_tracker(conn, clock)
+        tracker.record(5, "LATAM tentativa 1")
+        tracker.refund(5, "LATAM tentativa 1, HTTP 504")
+        tracker.record(5, "LATAM tentativa 2")
+        tracker.refund(5, "LATAM tentativa 2, HTTP 504")
+        tracker.record(5, "Azul tentativa 1")
+        assert tracker.used_this_month() == 5
+
+    def test_estorno_negativo_e_rejeitado(self, conn, clock):
+        with pytest.raises(ValueError):
+            make_tracker(conn, clock).refund(-5, "invalido")
+
+    def test_estorno_libera_orcamento_travado(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(100, "mes inteiro")
+        assert tracker.can_spend(5) is False
+        tracker.refund(10, "duas extracoes falhas")
+        assert tracker.can_spend(5) is True

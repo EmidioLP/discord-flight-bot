@@ -551,3 +551,53 @@ class TestRetryConscienteDeCusto:
         with pytest.raises(GeckoAPIError, match="Sem creditos"):
             client.extract({}, "LATAM")
         assert session.post.call_count == 1
+
+
+class TestEstornoDe5xx:
+    def test_504_debita_e_estorna(self):
+        session = Mock()
+        session.post.return_value = fake_response(status_code=504, text="UPSTREAM_TIMEOUT")
+        debitos, estornos = [], []
+        client = GeckoClient(
+            "k", max_retries=1, retry_delay_seconds=0, session=session,
+            credit_hook=debitos.append, refund_hook=estornos.append,
+        )
+        with pytest.raises(GeckoAPIHTTPError):
+            client.extract({}, "LATAM")
+        assert len(debitos) == 2
+        assert len(estornos) == 2, "liquido zero: a GeckoAPI devolve o que nao entregou"
+
+    def test_sucesso_nao_estorna(self):
+        session = Mock()
+        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
+        debitos, estornos = [], []
+        client = GeckoClient(
+            "k", session=session, credit_hook=debitos.append, refund_hook=estornos.append
+        )
+        client.extract({}, "LATAM")
+        assert len(debitos) == 1
+        assert estornos == []
+
+    def test_4xx_nao_estorna(self):
+        """Chave invalida e erro do cliente; nao ha promessa de estorno."""
+        session = Mock()
+        session.post.return_value = fake_response(status_code=401, text="unauthorized")
+        estornos = []
+        client = GeckoClient("k", session=session, refund_hook=estornos.append)
+        with pytest.raises(GeckoAPIHTTPError):
+            client.extract({}, "LATAM")
+        assert estornos == []
+
+    def test_timeout_do_cliente_nao_estorna(self):
+        """O request pode ter sido concluido do lado deles; erra para o lado seguro."""
+        session = Mock()
+        session.post.side_effect = requests.Timeout("estourou")
+        debitos, estornos = [], []
+        client = GeckoClient(
+            "k", max_retries=0, retry_delay_seconds=0, session=session,
+            credit_hook=debitos.append, refund_hook=estornos.append,
+        )
+        with pytest.raises(GeckoAPITimeout):
+            client.extract({}, "LATAM")
+        assert len(debitos) == 1
+        assert estornos == []

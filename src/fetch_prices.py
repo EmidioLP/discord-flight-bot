@@ -177,6 +177,7 @@ class GeckoClient:
         max_retries: int = 1,
         retry_delay_seconds: int = 60,
         credit_hook: Callable[[str], None] | None = None,
+        refund_hook: Callable[[str], None] | None = None,
         budget_guard: Callable[[], bool] | None = None,
         session: requests.Session | None = None,
         sleep_fn: Callable[[float], None] | None = None,
@@ -186,6 +187,7 @@ class GeckoClient:
         self.max_retries = max(0, max_retries)
         self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.credit_hook = credit_hook or (lambda _label: None)
+        self.refund_hook = refund_hook or (lambda _label: None)
         self.budget_guard = budget_guard or (lambda: True)
         self.session = session or requests.Session()
         self._sleep = sleep_fn or time.sleep
@@ -241,6 +243,11 @@ class GeckoClient:
             self.credit_hook(f"{label} (tentativa {attempt}, HTTP {response.status_code})")
 
             if response.status_code >= 500 or response.status_code == 429:
+                # A GeckoAPI estorna extracoes que ela mesma nao concluiu, entao
+                # lancamos o credito de volta. Debitamos primeiro e estornamos
+                # depois de proposito: se o processo morrer no meio, o ledger
+                # erra para o lado seguro (contando a mais, nunca a menos).
+                self.refund_hook(f"{label} (tentativa {attempt}, HTTP {response.status_code})")
                 last_error = GeckoAPIHTTPError(response.status_code, response.text)
                 logger.warning(
                     "GeckoAPI | %s | HTTP %s na tentativa %s",

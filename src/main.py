@@ -77,6 +77,7 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
         max_retries=settings.http_max_retries,
         retry_delay_seconds=settings.http_retry_delay_seconds,
         credit_hook=lambda label: tracker.record(settings.credits_per_request, label),
+        refund_hook=lambda label: tracker.refund(settings.credits_per_request, label),
         budget_guard=budget_guard,
     )
 

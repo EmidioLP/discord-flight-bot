@@ -103,6 +103,44 @@ class CreditsTracker:
         )
         return total
 
+    def refund(self, credits: int, reason: str = "") -> int:
+        """Registra um estorno como lancamento negativo no ledger.
+
+        A GeckoAPI devolve os creditos de extracoes que ela mesma nao concluiu
+        (por exemplo HTTP 504 / UPSTREAM_TIMEOUT). Sem lancar o estorno, o
+        contador sobe sozinho e passa a barrar checagens que ainda cabiam no
+        orcamento.
+
+        E um lancamento negativo em vez de apagar o debito original: o ledger
+        continua append-only e o historico mostra o que foi cobrado e o que
+        voltou.
+        """
+        if credits < 0:
+            raise ValueError("credits do estorno deve ser positivo")
+        now = self._now()
+        self.conn.execute(
+            """
+            INSERT INTO credit_usage (year_month, credits, reason, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                current_year_month(now),
+                -credits,
+                f"estorno: {reason}" if reason else "estorno",
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+        self.conn.commit()
+        total = self.used_this_month()
+        logger.info(
+            "Estorno -%s (%s) | usados no mes: %s/%s",
+            credits,
+            reason or "sem motivo informado",
+            total,
+            self.monthly_budget,
+        )
+        return total
+
     def ensure_budget(self, credits: int, reason: str = "") -> None:
         """Levanta CreditBudgetExceeded se o gasto nao couber no orcamento."""
         if not self.can_spend(credits):
