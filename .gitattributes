@@ -1,0 +1,11 @@
+# Normaliza tudo para LF no repositorio.
+* text=auto
+
+# Estes rodam no Linux (runner do GitHub Actions). Com CRLF o bash quebra com
+# erros do tipo "$'\r': command not found", entao forcamos LF tambem na copia
+# de trabalho, mesmo em Windows.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+
+*.db binary

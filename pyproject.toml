@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "discord-flight-bot"
+version = "0.1.0"
+description = "Monitor de precos de voos BEL <-> NAT com notificacao via webhook do Discord"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+# Banco remoto (Turso/libSQL). Necessario so em producao; local usa sqlite3 da stdlib.
+turso = [
+    "libsql>=0.1",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "libsql>=0.1",
+]
+
+[project.scripts]
+flight-bot = "src.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,67 @@
+name: Checagem de precos
+
+on:
+  schedule:
+    # 12:00 UTC = 09:00 em Belem (UTC-3, sem horario de verao).
+    # Dia-do-mes */4 => dias 1, 5, 9, 13, 17, 21, 25 e 29 = no maximo 8
+    # execucoes/mes = 80 creditos, dentro dos 100 do plano free.
+    - cron: "0 12 */4 * *"
+  # Permite disparar na mao pela aba Actions (gasta 10 creditos).
+  workflow_dispatch:
+
+# Duas execucoes nunca podem escrever no banco ao mesmo tempo. Nao cancelamos a
+# que ja esta rodando: ela pode ja ter gasto credito e estar prestes a gravar.
+concurrency:
+  group: checagem-precos
+  cancel-in-progress: false
+
+jobs:
+  checar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Necessario para o commit de keepalive no fim.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -e ".[turso]"
+
+      - name: Rodar checagem
+        env:
+          GECKOAPI_KEY: ${{ secrets.GECKOAPI_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python -m src.main once
+
+      - name: Registrar execucao
+        # Roda mesmo se a checagem falhar: o objetivo e manter o agendamento
+        # vivo. O GitHub desativa workflows agendados apos 60 dias sem
+        # atividade no repositorio, e com o banco remoto nada mais commita.
+        if: always()
+        env:
+          RESULTADO: ${{ job.status }}
+        run: |
+          mkdir -p data
+          {
+            echo "# Historico de execucoes"
+            echo
+            echo "Ultima: $(date -u '+%Y-%m-%d %H:%M UTC') - status: ${RESULTADO}"
+            echo
+            echo "Os precos ficam no Turso; este arquivo existe so para manter"
+            echo "o agendamento ativo e dar um rastro legivel das execucoes."
+          } > data/last-run.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/last-run.md
+          git diff --staged --quiet || git commit -m "chore: execucao ${RESULTADO} em $(date -u '+%Y-%m-%d')"
+          git push
