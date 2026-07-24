@@ -7,7 +7,9 @@ Fluxo de uma checagem:
   3. Qualquer falha vira embed vermelho no Discord em vez de silencio.
 
 Uso:
-    python -m src.main once        # roda uma checagem agora
+    python -m src.main once                  # checagem agora, sem janela
+    python -m src.main once --mode morning   # so dentro da janela da manha
+    python -m src.main once --mode evening   # so na vespera do reset, a noite
     python -m src.main schedule    # deixa rodando periodicamente (APScheduler)
     python -m src.main status      # historico local, sem tocar na rede
     python -m src.main credits     # saldo real na GeckoAPI e reconcilia o ledger
@@ -22,7 +24,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from . import compare, storage
+from . import compare, scheduling, storage
 from .config import SOURCE, ConfigError, Settings, load_settings, setup_logging
 from .credits_tracker import CreditBudgetExceeded, CreditsTracker
 from .discord_bot import DiscordError, notify_error, notify_offer
@@ -33,8 +35,14 @@ from .storage import DBConnection
 logger = logging.getLogger("main")
 
 
-def run_check(settings: Settings, conn: DBConnection) -> int:
-    """Executa uma checagem. Devolve 1 em sucesso, 0 em falha."""
+def run_check(
+    settings: Settings, conn: DBConnection, modo: str = scheduling.MODO_MANUAL
+) -> int:
+    """Executa uma checagem. Devolve 1 em sucesso, 0 em falha ou pulo.
+
+    `modo` decide qual janela vale: `morning` e a checagem regular, `evening` so
+    roda na vespera do reset de creditos, `manual` ignora janela.
+    """
     tracker = CreditsTracker(conn, monthly_budget=settings.monthly_credit_budget)
 
     logger.info(
@@ -56,13 +64,38 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
         credit_hook=lambda label: tracker.record(settings.credits_per_request, label),
         refund_hook=lambda label: tracker.refund(settings.credits_per_request, label),
     )
+    saldo_atual: int | None = None
     try:
         saldo = client.get_credits()
-        tracker.reconcile(saldo.current_credits)
+        saldo_atual = saldo.current_credits
+        tracker.reconcile(saldo_atual)
+        storage.save_balance_observation(
+            conn, saldo_atual, saldo.plan_id, datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
     except GeckoAPIError as exc:
         # Sem o saldo real seguimos com o ledger local, que erra para o lado
         # seguro. Nao vale abortar a checagem por causa disso.
         logger.warning("Nao consegui consultar o saldo real (%s); usando o ledger local.", exc)
+
+    # Gate de janela: o cron do Actions dispara em UTC e pode atrasar, entao a
+    # decisao final e tomada aqui, em horario local e com o saldo em maos.
+    decisao = scheduling.decide(
+        modo=modo,
+        agora_utc=datetime.now(timezone.utc),
+        saldo=saldo_atual,
+        custo=settings.credits_per_full_check,
+        timezone=settings.timezone,
+        janela_manha=settings.morning_window,
+        janela_noite=settings.evening_window,
+        reset_day=settings.credit_reset_day,
+        noite_habilitada=settings.evening_burst_enabled,
+    )
+    if not decisao:
+        # Sair calado de proposito: um "fora da janela" nao e erro e nao deve
+        # virar mensagem no Discord a cada disparo do cron da noite.
+        logger.info("Checagem nao executada: %s", decisao.motivo)
+        return 0
+    logger.info("Executando: %s", decisao.motivo)
 
     try:
         tracker.ensure_budget(settings.credits_per_full_check, "checagem")
@@ -153,9 +186,12 @@ def _open_db(settings: Settings):
     )
 
 
-def cmd_once(settings: Settings) -> int:
+def cmd_once(settings: Settings, modo: str = scheduling.MODO_MANUAL) -> int:
     with _open_db(settings) as conn:
-        return 0 if run_check(settings, conn) else 1
+        # Pular por estar fora da janela nao e falha: sai 0 para o Actions nao
+        # marcar o job como vermelho a cada disparo do cron da noite.
+        run_check(settings, conn, modo)
+    return 0
 
 
 def cmd_schedule(settings: Settings) -> int:
@@ -216,6 +252,16 @@ def cmd_status(settings: Settings) -> int:
             for airline, preco in sorted(por_companhia.items(), key=lambda kv: kv[1]):
                 print(f"  {airline:<28} R$ {preco:>9,.2f}")
             print()
+
+        dias_reset = storage.detect_reset_days(conn)
+        print(f"Reset de creditos: dia {settings.credit_reset_day} (suposicao)")
+        if dias_reset:
+            print(f"  Saldo subiu, na pratica, no(s) dia(s): {dias_reset}")
+            if settings.credit_reset_day not in dias_reset:
+                print(f"  ATENCAO: ajuste CREDIT_RESET_DAY para {dias_reset[-1]}")
+        else:
+            print("  Nenhum reset observado ainda; o bot registra o saldo a cada checagem.")
+        print()
 
         print("Ultimas checagens:")
         for row in storage.get_history(conn, limit=10):
@@ -304,6 +350,15 @@ def cli(argv: list[str] | None = None) -> int:
         prog="flight-bot", description="Monitor de precos de voos com aviso no Discord"
     )
     parser.add_argument("command", choices=sorted(COMMANDS), help="acao a executar")
+    parser.add_argument(
+        "--mode",
+        choices=scheduling.MODOS,
+        default=scheduling.MODO_MANUAL,
+        help=(
+            "janela de execucao do `once`: morning (checagem regular), "
+            "evening (so na vespera do reset de creditos) ou manual (sem janela)"
+        ),
+    )
     parser.add_argument("--log-level", default=None, help="DEBUG, INFO, WARNING, ERROR")
     args = parser.parse_args(argv)
 
@@ -318,6 +373,8 @@ def cli(argv: list[str] | None = None) -> int:
         return 2
 
     setup_logging(args.log_level or settings.log_level)
+    if args.command == "once":
+        return cmd_once(settings, args.mode)
     return COMMANDS[args.command](settings)
 
 

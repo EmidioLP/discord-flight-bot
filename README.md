@@ -9,8 +9,11 @@ metabusca cobre todas as companhias e agencias, e a mensagem informa de qual
 companhia e a viagem mais barata encontrada e quem a vende.
 
 Cada request custa **5 creditos** e o plano free da 100/mes, entao o bot roda
-**a cada 2 dias** (no maximo 16 checagens x 5 = 80 creditos) e tem um contador
-que impede o estouro mesmo se o scheduler disparar fora de hora.
+**a cada 2 dias, entre 05:00 e 09:00** de Belem, e tem um contador que impede o
+estouro mesmo se o scheduler disparar fora de hora.
+
+Na **vespera do reset de creditos** ele abre uma segunda janela, das 20:00 as
+23:00, e gasta o saldo que sobrou antes de virar po.
 
 ---
 
@@ -131,6 +134,48 @@ Em **Settings > Secrets and variables > Actions**, crie os quatro:
 Aba **Actions > Checagem de precos > Run workflow**. Gasta 5 creditos e deve
 resultar em um embed no Discord. A partir dai o cron assume: dias impares, as
 9h de Belem.
+
+### Janelas de execucao
+
+| Janela | Quando | Cron (UTC) | O que faz |
+| --- | --- | --- | --- |
+| Manha | dias impares, 05:00-09:00 | `0 9 */2 * *` | checagem regular |
+| Noite | so na vespera do reset, 20:00-23:00 | `0 23,0,1,2 * * *` | gasta o saldo restante |
+
+O cron da noite dispara **todo dia**, mas o codigo so executa se for a vespera
+do reset, se o horario local estiver na janela e se houver saldo. Nos outros
+dias ele sai calado com codigo 0 - nao gasta credito, nao manda mensagem e nao
+deixa o Actions vermelho.
+
+A decisao final e tomada em Python, nao no cron: o GitHub dispara em UTC e pode
+atrasar, entao o horario e reconvertido para Belem antes de decidir. Por isso o
+cron da manha e as 09:00 UTC (06:00 em Belem), com 3h de folga ate o fim da
+janela.
+
+Rajada da noite: sao 4 disparos (23:00, 00:00, 01:00 e 02:00 UTC, ou seja
+20:00 as 23:00 em Belem), e cada um so roda se ainda houver 5 creditos. No
+maximo 20 creditos sao gastos assim. Se sobrar mais que isso, dispare
+`Run workflow` com `mode: manual`.
+
+### Quando os creditos resetam
+
+**A GeckoAPI nao informa isso.** `GET /v1/me/credits` devolve saldo, plano e
+consumo em 24h/7d/30d, e nada sobre renovacao - a doc tambem nao diz se a cota
+e por mes-calendario ou por data de assinatura.
+
+Entao assumimos `CREDIT_RESET_DAY=1` (configuravel) e, para nao ficar no
+palpite, cada saldo observado e gravado em `credit_balance_history`. Um salto
+para cima e um reset, e `python -m src.main status` mostra em que dia ele
+aconteceu de verdade:
+
+```
+Reset de creditos: dia 1 (suposicao)
+  Saldo subiu, na pratica, no(s) dia(s): [14]
+  ATENCAO: ajuste CREDIT_RESET_DAY para 14
+```
+
+Ate observar o primeiro reset, a suposicao vale. Se ela estiver errada, o custo
+e s perder a rajada da noite naquele mes - a checagem da manha nao e afetada.
 
 ### Detalhes do workflow
 

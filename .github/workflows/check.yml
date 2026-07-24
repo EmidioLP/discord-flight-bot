@@ -2,13 +2,23 @@ name: Checagem de precos
 
 on:
   schedule:
-    # 12:00 UTC = 09:00 em Belem (UTC-3, sem horario de verao).
-    # Dia-do-mes */2 => dias impares = no maximo 16 execucoes/mes. Com o KAYAK
-    # cada checagem custa 5 creditos (uma request), entao 16 x 5 = 80, dentro
-    # dos 100 do plano free e com folga para retries.
-    - cron: "0 12 */2 * *"
-  # Permite disparar na mao pela aba Actions (gasta 10 creditos).
+    # Belem e UTC-3 o ano inteiro (sem horario de verao).
+    #
+    # MANHA: 09:00 UTC = 06:00 em Belem, dentro da janela 05:00-09:00 e com 3h
+    # de folga para o atraso do cron do GitHub. Dia-do-mes */2 => dias impares.
+    - cron: "0 9 */2 * *"
+    #
+    # NOITE: cobre 20:00-23:00 em Belem = 23:00-02:00 UTC. Dispara todo dia,
+    # mas o codigo so executa na vespera do reset de creditos e enquanto
+    # houver saldo - nos outros dias sai calado, sem gastar nada.
+    - cron: "0 23,0,1,2 * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Janela a respeitar"
+        type: choice
+        default: manual
+        options: [manual, morning, evening]
 
 # Duas execucoes nunca podem escrever no banco ao mesmo tempo. Nao cancelamos a
 # que ja esta rodando: ela pode ja ter gasto credito e estar prestes a gravar.
@@ -69,7 +79,12 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: python -m src.main once
+          # Disparo manual usa o modo escolhido; agendado, o cron da manha e
+          # o unico com */2, entao qualquer outro e da noite.
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 9 */2 * *' && 'morning' || 'evening') }}
+        run: |
+          echo "Modo: $MODE"
+          python -m src.main once --mode "$MODE"
 
       - name: Registrar execucao
         # Roda mesmo se a checagem falhar: o objetivo e manter o agendamento

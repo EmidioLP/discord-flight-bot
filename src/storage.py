@@ -24,6 +24,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Protocol, Sequence
 
@@ -86,6 +87,19 @@ CREATE TABLE IF NOT EXISTS credit_usage (
 
 CREATE INDEX IF NOT EXISTS idx_credit_usage_year_month
     ON credit_usage (year_month);
+
+-- Saldo observado em GET /v1/me/credits a cada consulta. A API nao informa
+-- quando os creditos resetam, entao registramos o saldo ao longo do tempo: um
+-- salto para cima e um reset, e a data dele deixa de ser suposicao.
+CREATE TABLE IF NOT EXISTS credit_balance_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at     TEXT    NOT NULL,
+    current_credits INTEGER NOT NULL,
+    plan_id         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_balance_observed
+    ON credit_balance_history (observed_at DESC);
 
 -- Respostas que a API devolveu mas o parser nao entendeu. O credito ja foi
 -- cobrado nesse ponto, entao guardar o payload e o que permite corrigir o
@@ -358,6 +372,49 @@ def get_failed_extraction(conn: DBConnection, extraction_id: int) -> dict[str, A
         "SELECT raw_response FROM failed_extractions WHERE id = ?", (extraction_id,)
     ).fetchone()
     return None if row is None else json.loads(row["raw_response"])
+
+
+def save_balance_observation(
+    conn: DBConnection, current_credits: int, plan_id: str | None, observed_at: str
+) -> None:
+    """Registra o saldo visto agora. Nunca propaga excecao: e telemetria."""
+    try:
+        conn.execute(
+            """
+            INSERT INTO credit_balance_history (observed_at, current_credits, plan_id)
+            VALUES (?, ?, ?)
+            """,
+            (observed_at, current_credits, plan_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Nao consegui registrar a observacao de saldo")
+
+
+def detect_reset_days(conn: DBConnection, min_jump: int = 10) -> list[int]:
+    """Dias do mes em que o saldo subiu - ou seja, em que houve reset.
+
+    Serve para conferir o palpite de `CREDIT_RESET_DAY`. Precisa de pelo menos
+    um reset observado para dizer alguma coisa; ate la devolve lista vazia.
+    """
+    linhas = conn.execute(
+        "SELECT observed_at, current_credits FROM credit_balance_history ORDER BY observed_at"
+    ).fetchall()
+
+    dias: list[int] = []
+    anterior: int | None = None
+    for linha in linhas:
+        atual = int(linha["current_credits"])
+        if anterior is not None and atual - anterior >= min_jump:
+            try:
+                dia = datetime.fromisoformat(str(linha["observed_at"]).replace("Z", "+00:00")).day
+            except ValueError:
+                anterior = atual
+                continue
+            if dia not in dias:
+                dias.append(dia)
+        anterior = atual
+    return dias
 
 
 def get_history(

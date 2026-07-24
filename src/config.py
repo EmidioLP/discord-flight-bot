@@ -63,6 +63,12 @@ class Settings:
     credits_per_request: int
     check_interval_days: int
 
+    timezone: str
+    morning_window: str
+    evening_window: str
+    evening_burst_enabled: bool
+    credit_reset_day: int
+
     db_path: Path
     turso_database_url: str
     turso_auth_token: str
@@ -120,6 +126,12 @@ def load_settings(*, require_secrets: bool = True) -> Settings:
         monthly_credit_budget=_get_int("MONTHLY_CREDIT_BUDGET", 100),
         credits_per_request=_get_int("CREDITS_PER_REQUEST", 5),
         check_interval_days=_get_int("CHECK_INTERVAL_DAYS", 2),
+        timezone=_get("TIMEZONE", "America/Belem"),
+        morning_window=_get("MORNING_WINDOW", "05:00-09:00"),
+        evening_window=_get("EVENING_WINDOW", "20:00-23:00"),
+        evening_burst_enabled=_get("EVENING_BURST_ENABLED", "true").lower()
+        not in ("0", "false", "nao", "no"),
+        credit_reset_day=_get_int("CREDIT_RESET_DAY", 1),
         db_path=db_path,
         turso_database_url=_get("TURSO_DATABASE_URL", ""),
         turso_auth_token=_get("TURSO_AUTH_TOKEN", ""),

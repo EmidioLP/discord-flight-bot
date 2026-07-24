@@ -12,6 +12,8 @@ dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
     "apscheduler>=3.10",
+    # zoneinfo precisa da base de fusos; Linux tem do sistema, Windows nao.
+    'tzdata; sys_platform == "win32"',
 ]
 
 [project.optional-dependencies]
