@@ -57,7 +57,7 @@ class TestRunCheck:
 
     def test_uma_checagem_gera_uma_linha_e_uma_mensagem(self, settings, conn):
         enviados = []
-        assert self._rodar(settings, conn, enviados) == 1
+        assert self._rodar(settings, conn, enviados).executou is True
         assert storage.count_checks(conn) == 1
         assert len(enviados) == 1
 
@@ -111,7 +111,7 @@ class TestRunCheck:
             "src.discord_bot.requests.post",
             side_effect=lambda url, json=None, **k: (enviados.append(json), Mock(status_code=204, text=""))[1],
         ):
-            assert run_check(settings, conn) == 0
+            assert run_check(settings, conn).executou is False
         post_mock.assert_not_called()
         assert len(enviados) == 1, "avisa o estouro no Discord"
 
@@ -123,7 +123,7 @@ class TestRunCheck:
         )
         conn.commit()
         # A GeckoAPI diz que o saldo esta cheio: os 90 do ledger eram inflacao.
-        assert self._rodar(settings, conn, []) == 1
+        assert self._rodar(settings, conn, []).executou is True
 
     def test_saldo_indisponivel_nao_derruba_a_checagem(self, settings, conn):
         """Sem o saldo real, seguimos com o ledger local (que erra para cima)."""
@@ -139,7 +139,7 @@ class TestRunCheck:
         ), patch(
             "src.fetch_prices.requests.Session.get", side_effect=requests.Timeout("sem saldo")
         ), patch("src.discord_bot.requests.post", side_effect=discord_post):
-            assert run_check(settings, conn) == 1
+            assert run_check(settings, conn).executou is True
         assert len(enviados) == 1
 
 
@@ -241,3 +241,51 @@ class TestMigracaoDoBanco:
         conn = storage.connect(caminho)  # roda o ALTER de novo
         assert storage.count_checks(conn) == 0
         conn.close()
+
+
+class TestCodigoDeSaida:
+    """Silencio no Discord nunca pode ser indistinguivel de sucesso."""
+
+    def _rodar_com_discord(self, settings, conn, status_discord):
+        def discord_post(url, json=None, **kwargs):
+            return Mock(status_code=status_discord, text="erro" if status_discord >= 400 else "")
+
+        with patch(
+            "src.fetch_prices.requests.Session.post",
+            side_effect=lambda *a, **k: fake_post(a[0] if a else k.get("url"), **k),
+        ), patch(
+            "src.fetch_prices.requests.Session.get",
+            side_effect=lambda *a, **k: fake_get(a[0] if a else k.get("url"), **k),
+        ), patch("src.discord_bot.requests.post", side_effect=discord_post):
+            return run_check(settings, conn, "manual")
+
+    def test_envio_ok_marca_notificado(self, settings, conn):
+        r = self._rodar_com_discord(settings, conn, 204)
+        assert r.executou is True
+        assert r.notificou is True
+
+    def test_webhook_invalido_marca_nao_notificado(self, settings, conn):
+        """Webhook apagado responde 404: o dado salva, mas voce nao soube."""
+        r = self._rodar_com_discord(settings, conn, 404)
+        assert r.executou is True, "a checagem em si funcionou"
+        assert r.notificou is False, "e precisa ficar visivel que nao chegou"
+        assert storage.count_checks(conn) == 1, "o preco nao se perde"
+
+    def test_cmd_once_retorna_erro_quando_nao_entrega(self, settings, conn, monkeypatch):
+        from src import main
+
+        monkeypatch.setattr(
+            main, "run_check", lambda *a, **k: main.Resultado(True, False, "webhook 404")
+        )
+        monkeypatch.setattr(main, "_open_db", lambda s: __import__("contextlib").nullcontext(conn))
+        assert main.cmd_once(settings, "manual") == 1
+
+    def test_pulo_de_janela_sai_zero(self, settings, conn, monkeypatch):
+        """O cron da noite dispara todo dia; pular nao pode pintar de vermelho."""
+        from src import main
+
+        monkeypatch.setattr(
+            main, "run_check", lambda *a, **k: main.Resultado(False, True, "fora da janela")
+        )
+        monkeypatch.setattr(main, "_open_db", lambda s: __import__("contextlib").nullcontext(conn))
+        assert main.cmd_once(settings, "evening") == 0

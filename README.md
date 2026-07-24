@@ -291,6 +291,10 @@ Decisoes que valem registro:
 - **HTTP 5xx gera estorno no ledger.** A GeckoAPI devolve o credito de
   extracoes que ela nao concluiu, e sem lancar o estorno o contador subiria
   sozinho e barraria checagens que ainda cabiam.
+- **Nao entregar a mensagem e falha, e o job fica vermelho.** O preco continua
+  salvo no banco, mas num bot cujo unico produto e a notificacao, silencio
+  indistinguivel de sucesso e o pior desfecho. Pular por estar fora da janela,
+  ao contrario, sai com codigo 0: e o comportamento desejado.
 - **Falha de uma companhia nao derruba a outra**, e vira um embed vermelho de
   erro no Discord para voce nao achar que esta tudo bem em silencio.
 

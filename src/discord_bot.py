@@ -215,9 +215,15 @@ def notify_error(
     error: Exception,
     route_label: str,
     timeout: int = 30,
-) -> None:
-    """Notifica falha sem propagar excecao nova (nao queremos derrubar o pipeline)."""
+) -> bool:
+    """Notifica falha. Devolve False se nem o aviso conseguiu sair.
+
+    Nao propaga excecao para nao mascarar o erro original, mas o chamador
+    precisa saber que a mensagem nao chegou - senao a falha vira silencio.
+    """
     try:
         send_embed(webhook_url, build_error_embed(source, error, route_label), timeout)
+        return True
     except DiscordError:
         logger.exception("Nao consegui nem avisar o erro no Discord (%s)", source)
+        return False

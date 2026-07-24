@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from . import compare, scheduling, storage
 from .config import SOURCE, ConfigError, Settings, load_settings, setup_logging
@@ -35,10 +36,25 @@ from .storage import DBConnection
 logger = logging.getLogger("main")
 
 
+class Resultado(NamedTuple):
+    """Desfecho de uma execucao, para o codigo de saida refletir a realidade.
+
+    Pular por estar fora da janela nao e erro. Consultar o preco e nao
+    conseguir entregar a mensagem E erro: num bot cujo unico produto e a
+    notificacao, silencio indistinguivel de sucesso e o pior desfecho.
+    """
+
+    executou: bool
+    # "tudo que precisava ser entregue foi entregue". Um pulo de janela nao
+    # tinha nada a entregar, entao conta como True.
+    notificou: bool
+    motivo: str = ""
+
+
 def run_check(
     settings: Settings, conn: DBConnection, modo: str = scheduling.MODO_MANUAL
-) -> int:
-    """Executa uma checagem. Devolve 1 em sucesso, 0 em falha ou pulo.
+) -> Resultado:
+    """Executa uma checagem.
 
     `modo` decide qual janela vale: `morning` e a checagem regular, `evening` so
     roda na vespera do reset de creditos, `manual` ignora janela.
@@ -94,15 +110,17 @@ def run_check(
         # Sair calado de proposito: um "fora da janela" nao e erro e nao deve
         # virar mensagem no Discord a cada disparo do cron da noite.
         logger.info("Checagem nao executada: %s", decisao.motivo)
-        return 0
+        # notificou=True porque nao havia nada a entregar: pular a janela e o
+        # comportamento desejado, nao uma entrega que falhou.
+        return Resultado(executou=False, notificou=True, motivo=decisao.motivo)
     logger.info("Executando: %s", decisao.motivo)
 
     try:
         tracker.ensure_budget(settings.credits_per_full_check, "checagem")
     except CreditBudgetExceeded as exc:
         logger.error("Checagem abortada: %s", exc)
-        notify_error(settings.discord_webhook_url, "ORCAMENTO", exc, settings.route_label)
-        return 0
+        avisou = notify_error(settings.discord_webhook_url, "ORCAMENTO", exc, settings.route_label)
+        return Resultado(executou=False, notificou=avisou, motivo=str(exc))
 
     # Teto por execucao, alem do teto mensal. Sem ele, uma sequencia de erros
     # 5xx com retry poderia consumir varias checagens do mes numa tacada so.
@@ -137,12 +155,12 @@ def run_check(
                 "Resposta bruta (para corrigir o parser):\n%s",
                 json.dumps(exc.payload, ensure_ascii=False)[:20000],
             )
-        notify_error(settings.discord_webhook_url, SOURCE, exc, settings.route_label)
-        return 0
+        avisou = notify_error(settings.discord_webhook_url, SOURCE, exc, settings.route_label)
+        return Resultado(executou=False, notificou=avisou, motivo=str(exc))
     except GeckoAPIError as exc:
         logger.error("Falha na consulta ao KAYAK: %s", exc)
-        notify_error(settings.discord_webhook_url, SOURCE, exc, settings.route_label)
-        return 0
+        avisou = notify_error(settings.discord_webhook_url, SOURCE, exc, settings.route_label)
+        return Resultado(executou=False, notificou=avisou, motivo=str(exc))
 
     # Compara ANTES de salvar, senao o preco atual entra no proprio MIN().
     comparison = compare.compare_with_history(conn, offer.airline, offer.price)
@@ -155,6 +173,8 @@ def run_check(
         offer.provider or "vendedor nao informado",
     )
 
+    notificou = True
+    motivo = ""
     try:
         notify_offer(
             webhook_url=settings.discord_webhook_url,
@@ -164,11 +184,14 @@ def run_check(
             credits_summary=tracker.summary(),
         )
     except DiscordError as exc:
-        # O dado ja esta salvo; falhar o envio nao invalida a checagem.
+        # O dado ja esta salvo, entao a checagem nao se perde - mas a mensagem
+        # e o produto do bot, e nao entregar precisa ficar visivel.
         logger.error("Nao consegui notificar no Discord: %s", exc)
+        notificou = False
+        motivo = str(exc)
 
     logger.info("Checagem finalizada | creditos: %s", tracker.summary())
-    return 1
+    return Resultado(executou=True, notificou=notificou, motivo=motivo)
 
 
 # --------------------------------------------------------------------------
@@ -188,9 +211,16 @@ def _open_db(settings: Settings):
 
 def cmd_once(settings: Settings, modo: str = scheduling.MODO_MANUAL) -> int:
     with _open_db(settings) as conn:
-        # Pular por estar fora da janela nao e falha: sai 0 para o Actions nao
-        # marcar o job como vermelho a cada disparo do cron da noite.
-        run_check(settings, conn, modo)
+        resultado = run_check(settings, conn, modo)
+
+    if not resultado.notificou:
+        # Vermelho no Actions de proposito: sem mensagem entregue, voce nao
+        # teria como distinguir "pulou a janela" de "quebrou".
+        logger.error("Nada foi entregue no Discord. Motivo: %s", resultado.motivo)
+        return 1
+
+    # Pular por estar fora da janela nao e falha: sai 0 para o cron da noite
+    # nao pintar o Actions de vermelho todo dia.
     return 0
 
 
