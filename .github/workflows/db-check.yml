@@ -1,0 +1,75 @@
+name: Testar conexao com o banco
+
+# Valida Turso + secrets SEM gastar credito da GeckoAPI.
+# O comando `status` so conecta no banco, aplica o schema e imprime o resumo;
+# nao ha nenhuma chamada a API de precos. Use este workflow antes do primeiro
+# "Checagem de precos", que custa 10 creditos.
+on:
+  workflow_dispatch:
+
+jobs:
+  testar-banco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -e ".[turso]"
+
+      - name: Conectar no Turso e imprimir status
+        env:
+          # De proposito sem GECKOAPI_KEY e sem DISCORD_WEBHOOK_URL: se algum
+          # dia este job passar a precisar deles, e porque alguem fez o status
+          # chamar a API - e ai ele deixaria de ser gratuito.
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python -m src.main status
+
+      - name: Conferir que as tabelas existem
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from src import storage
+
+          with storage.get_connection(
+              "",
+              remote_url=os.environ["TURSO_DATABASE_URL"],
+              auth_token=os.environ["TURSO_AUTH_TOKEN"],
+          ) as conn:
+              tabelas = [
+                  r["name"]
+                  for r in conn.execute(
+                      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                  ).fetchall()
+              ]
+              print("Tabelas no Turso:", tabelas)
+              assert "price_checks" in tabelas, "price_checks nao foi criada"
+              assert "credit_usage" in tabelas, "credit_usage nao foi criada"
+
+              # Escrita e leitura de verdade, para provar que o token e rw.
+              conn.execute(
+                  "INSERT INTO credit_usage (year_month, credits, reason, recorded_at)"
+                  " VALUES ('0000-00', 0, 'teste de conexao', 'teste')"
+              )
+              conn.commit()
+              total = conn.execute(
+                  "SELECT COUNT(*) FROM credit_usage WHERE year_month = '0000-00'"
+              ).fetchone()[0]
+              print("Escrita OK, linhas de teste:", total)
+
+              # Limpa: year_month '0000-00' nunca casa com um mes real, mas nao
+              # ha razao para deixar lixo no banco.
+              conn.execute("DELETE FROM credit_usage WHERE year_month = '0000-00'")
+              conn.commit()
+              print("Limpeza OK. Conexao com o Turso validada.")
+          PY
