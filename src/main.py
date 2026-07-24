@@ -21,7 +21,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from . import compare, storage
 from .storage import DBConnection
@@ -32,6 +32,15 @@ from .fetch_prices import FETCHERS, GeckoAPIError, GeckoAPIParseError, GeckoClie
 from .models import Leg, Offer
 
 logger = logging.getLogger("main")
+
+
+class AirlineResult(NamedTuple):
+    """Desfecho da consulta de uma companhia, antes de decidir o que notificar."""
+
+    airline: str
+    offer: Offer | None = None
+    comparison: compare.Comparison | None = None
+    error: str | None = None
 
 
 def run_check(settings: Settings, conn: DBConnection) -> int:
@@ -81,20 +90,79 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
         budget_guard=budget_guard,
     )
 
-    successes = 0
+    resultados: list[AirlineResult] = []
     for airline in AIRLINES:
         try:
-            successes += _check_airline(settings, conn, tracker, client, airline, budget_guard)
-        except Exception:  # noqa: BLE001 - uma companhia nao pode derrubar a outra
+            resultados.append(
+                _check_airline(settings, conn, tracker, client, airline, budget_guard)
+            )
+        except Exception as exc:  # noqa: BLE001 - uma companhia nao pode derrubar a outra
             logger.exception("Erro inesperado ao processar %s", airline)
+            resultados.append(AirlineResult(airline=airline, error=f"{type(exc).__name__}: {exc}"))
+
+    sucessos = [r for r in resultados if r.offer is not None]
+    falhas = [(r.airline, r.error or "erro desconhecido") for r in resultados if r.offer is None]
+
+    _notificar(settings, tracker, sucessos, falhas)
 
     logger.info(
         "Checagem finalizada | %s/%s companhias | creditos: %s",
-        successes,
+        len(sucessos),
         len(AIRLINES),
         tracker.summary(),
     )
-    return successes
+    return len(sucessos)
+
+
+def _notificar(
+    settings: Settings,
+    tracker: CreditsTracker,
+    sucessos: list[AirlineResult],
+    falhas: list[tuple[str, str]],
+) -> None:
+    """Envia UMA mensagem por checagem: a companhia mais barata.
+
+    As duas companhias continuam sendo salvas no banco - so a notificacao e
+    que e enxuta. Falhas viram uma nota dentro do mesmo embed; so quando
+    nenhuma companhia responde e que sai um embed de erro no lugar.
+    """
+    if not sucessos:
+        logger.error("Nenhuma companhia respondeu; avisando o erro no Discord.")
+        detalhe = "\n".join(f"{airline}: {erro}" for airline, erro in falhas)
+        notify_error(
+            settings.discord_webhook_url,
+            "TODAS AS COMPANHIAS",
+            RuntimeError(detalhe or "sem detalhes"),
+            settings.route_label,
+        )
+        return
+
+    vencedor = min(sucessos, key=lambda r: r.offer.price)  # type: ignore[union-attr]
+    alternativas = [
+        (r.airline, r.offer.price)  # type: ignore[union-attr]
+        for r in sucessos
+        if r is not vencedor
+    ]
+    logger.info(
+        "Mais barata: %s por %.2f | alternativas: %s",
+        vencedor.airline,
+        vencedor.offer.price,  # type: ignore[union-attr]
+        alternativas,
+    )
+
+    try:
+        notify_offer(
+            webhook_url=settings.discord_webhook_url,
+            offer=vencedor.offer,
+            comparison=vencedor.comparison,
+            route_label=settings.route_label,
+            credits_summary=tracker.summary(),
+            alternatives=alternativas,
+            failures=falhas,
+        )
+    except DiscordError as exc:
+        # Os dados ja estao salvos; falhar o envio nao invalida a checagem.
+        logger.error("Nao consegui notificar no Discord: %s", exc)
 
 
 def _check_airline(
@@ -104,13 +172,17 @@ def _check_airline(
     client: GeckoClient,
     airline: str,
     budget_guard: Callable[[], bool],
-) -> int:
-    """Processa uma companhia. Devolve 1 em sucesso, 0 em falha."""
+) -> AirlineResult:
+    """Consulta, compara e salva uma companhia. Nao notifica.
+
+    A notificacao e decidida depois, em `_notificar`, que precisa ver as duas
+    companhias para saber qual e a mais barata.
+    """
     logger.info("--- %s ---", airline)
 
     if not budget_guard():
         logger.warning("Sem creditos disponiveis para consultar %s; pulando.", airline)
-        return 0
+        return AirlineResult(airline=airline, error="sem creditos disponiveis")
 
     try:
         offer = FETCHERS[airline](client, settings)
@@ -126,30 +198,16 @@ def _check_airline(
                 airline,
                 json.dumps(exc.payload, ensure_ascii=False)[:20000],
             )
-        notify_error(settings.discord_webhook_url, airline, exc, settings.route_label)
-        return 0
+        return AirlineResult(airline=airline, error=str(exc))
     except GeckoAPIError as exc:
         logger.error("Falha na consulta da %s: %s", airline, exc)
-        notify_error(settings.discord_webhook_url, airline, exc, settings.route_label)
-        return 0
+        return AirlineResult(airline=airline, error=str(exc))
 
     # Compara ANTES de salvar, senao o preco atual entra no proprio MIN().
     comparison = compare.compare_with_history(conn, airline, offer.price)
     storage.save_offer(conn, offer)
 
-    try:
-        notify_offer(
-            webhook_url=settings.discord_webhook_url,
-            offer=offer,
-            comparison=comparison,
-            route_label=settings.route_label,
-            credits_summary=tracker.summary(),
-        )
-    except DiscordError as exc:
-        # O dado ja esta salvo; falhar o envio nao invalida a checagem.
-        logger.error("Nao consegui notificar %s no Discord: %s", airline, exc)
-
-    return 1
+    return AirlineResult(airline=airline, offer=offer, comparison=comparison)
 
 
 # --------------------------------------------------------------------------

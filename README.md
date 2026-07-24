@@ -198,7 +198,7 @@ main.py
   |- fetch_prices.fetch_latam/fetch_azul    # 5 creditos cada, com retry
   |- compare.compare_with_history           # MIN(price) ANTES de salvar
   |- storage.save_offer                     # inclui o JSON bruto
-  `- discord_bot.notify_offer               # 1 embed por companhia
+  `- discord_bot.notify_offer               # 1 embed: a companhia mais barata
 ```
 
 Decisoes que valem registro:
@@ -212,6 +212,16 @@ Decisoes que valem registro:
   cobrou. Erro de conexao (request nao chegou a sair) nao debita.
 - **O ledger de creditos e chaveado por `YYYY-MM`.** O "reset todo dia 1"
   acontece sozinho na virada do mes, sem rotina de limpeza.
+- **Uma checagem = uma mensagem.** As duas companhias sao consultadas e
+  salvas, mas so a mais barata vira embed, com o preco da outra num campo de
+  comparacao. Se uma falhar, vira uma nota dentro do mesmo embed em vez de uma
+  segunda mensagem.
+- **Duracao tem fallback pelos horarios.** A Azul manda `duration` num formato
+  que nem sempre da para interpretar; quando nao da, a duracao e calculada
+  subtraindo saida de chegada.
+- **HTTP 5xx gera estorno no ledger.** A GeckoAPI devolve o credito de
+  extracoes que ela nao concluiu, e sem lancar o estorno o contador subiria
+  sozinho e barraria checagens que ainda cabiam.
 - **Falha de uma companhia nao derruba a outra**, e vira um embed vermelho de
   erro no Discord para voce nao achar que esta tudo bem em silencio.
 

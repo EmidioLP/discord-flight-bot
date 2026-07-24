@@ -72,8 +72,16 @@ def build_embed(
     comparison: Comparison,
     route_label: str,
     credits_summary: dict[str, Any] | None = None,
+    alternatives: list[tuple[str, float]] | None = None,
+    failures: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Monta o embed de uma companhia."""
+    """Monta o embed da companhia mais barata da checagem.
+
+    `alternatives` sao as demais companhias consultadas com sucesso, para o
+    embed mostrar quanto a escolhida esta mais barata. `failures` sao as que
+    nao responderam - viram uma nota no rodape do embed em vez de uma segunda
+    mensagem, para cada checagem gerar exatamente uma notificacao.
+    """
     airline_name = AIRLINE_LABELS.get(offer.airline, offer.airline)
     title_prefix = "NOVO MENOR PRECO - " if comparison.is_new_low else ""
 
@@ -97,6 +105,21 @@ def build_embed(
         {"name": "Ida", "value": _leg_block(offer.outbound), "inline": True},
         {"name": "Volta", "value": _leg_block(offer.inbound), "inline": True},
     ]
+
+    if alternatives:
+        linhas = []
+        for nome, preco in sorted(alternatives, key=lambda item: item[1]):
+            rotulo = AIRLINE_LABELS.get(nome, nome)
+            diferenca = preco - offer.price
+            linhas.append(
+                f"{rotulo}: {format_money(preco, offer.currency)} "
+                f"(+{format_money(diferenca, offer.currency)})"
+                if diferenca > 0
+                else f"{rotulo}: {format_money(preco, offer.currency)}"
+            )
+        fields.append(
+            {"name": "Outras companhias nesta checagem", "value": "\n".join(linhas), "inline": False}
+        )
 
     if offer.total_duration_minutes is not None:
         hours, minutes = divmod(offer.total_duration_minutes, 60)
@@ -132,6 +155,15 @@ def build_embed(
             )
         fields.append({"name": "Desde a ultima checagem", "value": text, "inline": False})
 
+    if failures:
+        fields.append(
+            {
+                "name": "Nao consegui consultar",
+                "value": "\n".join(f"**{AIRLINE_LABELS.get(n, n)}**: {e}"[:300] for n, e in failures),
+                "inline": False,
+            }
+        )
+
     footer = f"{route_label} | consultado em {_format_datetime(offer.checked_at)}"
     if credits_summary:
         footer += (
@@ -139,9 +171,11 @@ def build_embed(
             f"em {credits_summary['year_month']}"
         )
 
+    descricao = f"Mais barata desta checagem | {route_label}" if alternatives else route_label
+
     return {
         "title": f"{title_prefix}{airline_name}",
-        "description": f"Monitoramento de precos {route_label}",
+        "description": descricao,
         "color": _pick_color(comparison),
         "fields": fields,
         "footer": {"text": footer[:2048]},
@@ -187,9 +221,15 @@ def notify_offer(
     comparison: Comparison,
     route_label: str,
     credits_summary: dict[str, Any] | None = None,
+    alternatives: list[tuple[str, float]] | None = None,
+    failures: list[tuple[str, str]] | None = None,
     timeout: int = 30,
 ) -> None:
-    send_embed(webhook_url, build_embed(offer, comparison, route_label, credits_summary), timeout)
+    send_embed(
+        webhook_url,
+        build_embed(offer, comparison, route_label, credits_summary, alternatives, failures),
+        timeout,
+    )
 
 
 def notify_error(

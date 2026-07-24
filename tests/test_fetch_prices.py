@@ -601,3 +601,55 @@ class TestEstornoDe5xx:
             client.extract({}, "LATAM")
         assert len(debitos) == 1
         assert estornos == []
+
+
+class TestDuracaoCalculadaPelosHorarios:
+    """A Azul mandou `duration` num formato nao reconhecido; os horarios salvam."""
+
+    @pytest.mark.parametrize(
+        "saida,chegada,esperado",
+        [
+            ("2026-12-27T09:00:00", "2026-12-27T14:20:00", 320),
+            ("2026-12-27T09:00:00.000Z", "2026-12-27T12:40:00.000Z", 220),
+            ("2026-12-27T22:10:00", "2026-12-28T01:20:00", 190),  # vira o dia
+            ("2026-12-27T09:00:00-03:00", "2026-12-27T14:20:00-03:00", 320),
+            (None, "2026-12-27T14:20:00", None),
+            ("2026-12-27T09:00:00", None, None),
+            ("nao e data", "2026-12-27T14:20:00", None),
+            ("2026-12-27T14:20:00", "2026-12-27T09:00:00", None),  # chegada antes da saida
+            ("2026-12-27T09:00:00", "2026-12-27T09:00:00", None),  # duracao zero
+        ],
+    )
+    def test_calcula_a_partir_dos_horarios(self, saida, chegada, esperado):
+        from src.fetch_prices import duration_from_timestamps
+
+        assert duration_from_timestamps(saida, chegada) == esperado
+
+    def test_fusos_incompativeis_nao_quebram(self):
+        from src.fetch_prices import duration_from_timestamps
+
+        assert duration_from_timestamps("2026-12-27T09:00:00", "2026-12-27T14:20:00Z") is None
+
+    def test_azul_com_duration_ilegivel_usa_os_horarios(self, settings):
+        journey = azul_journey(
+            "BEL", "NAT", "2026-12-27T09:00:00", "2026-12-27T14:20:00", "5h20", 1, 700.0
+        )
+        payload = {"data": {"currency": "BRL", "trips": [{"origin": "BEL", "journeys": [journey]}]}}
+        offer = parse_azul(payload, settings)
+        assert offer.outbound.duration_minutes == 320
+        assert offer.outbound.duration_label == "5h20min"
+
+    def test_duration_valida_tem_prioridade_sobre_o_calculo(self, settings):
+        """Se a API informa a duracao, ela manda - pode haver escala nao refletida."""
+        journey = azul_journey(
+            "BEL", "NAT", "2026-12-27T09:00:00", "2026-12-27T14:20:00", "PT4H", 1, 700.0
+        )
+        payload = {"data": {"currency": "BRL", "trips": [{"origin": "BEL", "journeys": [journey]}]}}
+        assert parse_azul(payload, settings).outbound.duration_minutes == 240
+
+    def test_latam_tambem_tem_o_fallback(self, settings):
+        item = latam_item(
+            "BEL", "NAT", "2026-12-27T08:15:00.000Z", "2026-12-27T12:40:00.000Z", None, 1, 500.0
+        )
+        offer = parse_latam({"data": {"success": True, "items": [item]}}, settings)
+        assert offer.outbound.duration_minutes == 265

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any, Callable, Iterable
 
 import requests
@@ -117,6 +118,45 @@ def parse_duration_to_minutes(value: Any) -> int | None:
 
     logger.warning("Nao consegui interpretar a duracao %r", value)
     return None
+
+
+def duration_from_timestamps(departure: Any, arrival: Any) -> int | None:
+    """Calcula a duracao em minutos a partir da saida e da chegada.
+
+    Rede de seguranca para quando a API manda a duracao num formato que
+    `parse_duration_to_minutes` nao reconhece: os horarios ja estao ali, e a
+    subtracao deles e mais confiavel do que adivinhar mais um formato.
+    """
+    if not departure or not arrival:
+        return None
+    try:
+        inicio = datetime.fromisoformat(str(departure).replace("Z", "+00:00"))
+        fim = datetime.fromisoformat(str(arrival).replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Horarios em formato inesperado: %r -> %r", departure, arrival)
+        return None
+
+    # Misturar naive com aware levanta TypeError na subtracao.
+    if (inicio.tzinfo is None) != (fim.tzinfo is None):
+        logger.warning("Saida e chegada com fusos incompativeis: %r / %r", departure, arrival)
+        return None
+
+    minutos = int((fim - inicio).total_seconds() // 60)
+    if minutos <= 0:
+        logger.warning("Duracao calculada nao positiva (%s min): %r -> %r", minutos, departure, arrival)
+        return None
+    return minutos
+
+
+def _resolve_duration(raw: Any, departure: Any, arrival: Any) -> int | None:
+    """Usa a duracao informada; se nao der para interpretar, calcula pelos horarios."""
+    minutos = parse_duration_to_minutes(raw)
+    if minutos is not None:
+        return minutos
+    calculado = duration_from_timestamps(departure, arrival)
+    if calculado is not None:
+        logger.info("Duracao %r nao reconhecida; calculei %s min pelos horarios", raw, calculado)
+    return calculado
 
 
 def _as_float(value: Any) -> float | None:
@@ -324,12 +364,14 @@ def _latam_item_price(item: dict[str, Any]) -> float | None:
 def _latam_item_to_leg(item: dict[str, Any]) -> Leg:
     route = item.get("route") or {}
     flight = item.get("flight") or {}
+    departure = route.get("departure")
+    arrival = route.get("arrival")
     return Leg(
         origin=str(route.get("originIata") or ""),
         destination=str(route.get("destinationIata") or ""),
-        departure=route.get("departure"),
-        arrival=route.get("arrival"),
-        duration_minutes=parse_duration_to_minutes(flight.get("durationMinutes")),
+        departure=departure,
+        arrival=arrival,
+        duration_minutes=_resolve_duration(flight.get("durationMinutes"), departure, arrival),
         stops=_as_int(flight.get("stops")),
     )
 
@@ -427,12 +469,14 @@ def _azul_journey_price(journey: dict[str, Any]) -> float | None:
 
 
 def _azul_journey_to_leg(journey: dict[str, Any]) -> Leg:
+    departure = journey.get("departure")
+    arrival = journey.get("arrival")
     return Leg(
         origin=str(journey.get("origin") or ""),
         destination=str(journey.get("destination") or ""),
-        departure=journey.get("departure"),
-        arrival=journey.get("arrival"),
-        duration_minutes=parse_duration_to_minutes(journey.get("duration")),
+        departure=departure,
+        arrival=arrival,
+        duration_minutes=_resolve_duration(journey.get("duration"), departure, arrival),
         stops=_as_int(journey.get("stopsCount")),
     )
 
