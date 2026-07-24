@@ -144,3 +144,51 @@ class TestSummary:
         tracker = make_tracker(conn, clock, budget=10)
         tracker.record(50, "estouro")
         assert tracker.summary()["remaining"] == 0
+
+
+class TestTetoPorExecucao:
+    """Reproduz o guard de run_check: teto mensal E teto por execucao."""
+
+    @staticmethod
+    def _guard(tracker, usado_no_inicio, teto_run, custo=5):
+        def guard():
+            if not tracker.can_spend(custo):
+                return False
+            return (tracker.used_this_month() - usado_no_inicio) + custo <= teto_run
+
+        return guard
+
+    def test_corta_em_20_creditos_mesmo_com_orcamento_mensal_sobrando(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        guard = self._guard(tracker, tracker.used_this_month(), teto_run=20)
+
+        gastos = 0
+        while guard():
+            tracker.record(5, "tentativa")
+            gastos += 5
+        assert gastos == 20
+        assert tracker.remaining() == 80, "o teto mensal ainda tem folga"
+
+    def test_teto_mensal_prevalece_quando_e_menor(self, conn, clock):
+        tracker = make_tracker(conn, clock)
+        tracker.record(90, "mes quase cheio")
+        guard = self._guard(tracker, tracker.used_this_month(), teto_run=20)
+
+        gastos = 0
+        while guard():
+            tracker.record(5, "tentativa")
+            gastos += 5
+        assert gastos == 10, "so cabiam 10 creditos ate o limite mensal"
+        assert tracker.used_this_month() == 100
+
+    def test_teto_conta_so_o_gasto_do_run_atual(self, conn, clock):
+        """Gasto de execucoes anteriores no mesmo mes nao consome o teto do run."""
+        tracker = make_tracker(conn, clock)
+        tracker.record(40, "execucoes anteriores")
+        guard = self._guard(tracker, tracker.used_this_month(), teto_run=20)
+
+        gastos = 0
+        while guard():
+            tracker.record(5, "tentativa")
+            gastos += 5
+        assert gastos == 20

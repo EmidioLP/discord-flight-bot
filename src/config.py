@@ -68,6 +68,8 @@ class Settings:
     turso_auth_token: str
     http_timeout_seconds: int
     http_max_retries: int
+    http_retry_delay_seconds: int
+    max_credits_per_run: int
     log_level: str
 
     @property
@@ -122,7 +124,9 @@ def load_settings(*, require_secrets: bool = True) -> Settings:
         turso_database_url=_get("TURSO_DATABASE_URL", ""),
         turso_auth_token=_get("TURSO_AUTH_TOKEN", ""),
         http_timeout_seconds=_get_int("HTTP_TIMEOUT_SECONDS", 120),
-        http_max_retries=_get_int("HTTP_MAX_RETRIES", 2),
+        http_max_retries=_get_int("HTTP_MAX_RETRIES", 1),
+        http_retry_delay_seconds=_get_int("HTTP_RETRY_DELAY_SECONDS", 60),
+        max_credits_per_run=_get_int("MAX_CREDITS_PER_RUN", 20),
         log_level=_get("LOG_LEVEL", "INFO").upper(),
     )
 

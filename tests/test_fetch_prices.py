@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from src.fetch_prices import (
+    GeckoAPIError,
     GeckoAPIHTTPError,
     GeckoAPIParseError,
     GeckoAPITimeout,
@@ -491,3 +492,62 @@ class TestParseErrorCarregaPayload:
 
     def test_payload_e_opcional(self):
         assert GeckoAPIParseError("erro sem payload").payload is None
+
+
+class TestRetryConscienteDeCusto:
+    """Cada tentativa custa 5 creditos, entao a politica de retry e financeira."""
+
+    def test_default_e_uma_retentativa(self):
+        assert GeckoClient("k").max_retries == 1
+
+    def test_pausa_entre_tentativas(self):
+        session = Mock()
+        session.post.side_effect = [
+            fake_response(status_code=504, text="UPSTREAM_TIMEOUT"),
+            fake_response(json_data=LATAM_PAYLOAD),
+        ]
+        pausas = []
+        client = GeckoClient(
+            "k", max_retries=1, retry_delay_seconds=60,
+            session=session, sleep_fn=pausas.append,
+        )
+        client.extract({}, "LATAM")
+        assert pausas == [60], "retry imediato encontra a mesma lentidao e queima credito"
+
+    def test_nao_pausa_antes_da_primeira_tentativa(self):
+        session = Mock()
+        session.post.return_value = fake_response(json_data=LATAM_PAYLOAD)
+        pausas = []
+        client = GeckoClient("k", retry_delay_seconds=60, session=session, sleep_fn=pausas.append)
+        client.extract({}, "LATAM")
+        assert pausas == []
+
+    def test_504_custa_no_maximo_dois_creditos_de_tentativa(self):
+        session = Mock()
+        session.post.return_value = fake_response(status_code=504, text="UPSTREAM_TIMEOUT")
+        gastos = []
+        client = GeckoClient(
+            "k", max_retries=1, retry_delay_seconds=0,
+            session=session, credit_hook=gastos.append, sleep_fn=lambda _s: None,
+        )
+        with pytest.raises(GeckoAPIHTTPError):
+            client.extract({}, "LATAM")
+        assert len(gastos) == 2
+        assert session.post.call_count == 2
+
+    def test_budget_guard_corta_o_retry_no_meio(self):
+        session = Mock()
+        session.post.return_value = fake_response(status_code=504, text="timeout")
+        chamadas = {"n": 0}
+
+        def guard():
+            chamadas["n"] += 1
+            return chamadas["n"] <= 1  # libera so a primeira tentativa
+
+        client = GeckoClient(
+            "k", max_retries=3, retry_delay_seconds=0,
+            session=session, budget_guard=guard, sleep_fn=lambda _s: None,
+        )
+        with pytest.raises(GeckoAPIError, match="Sem creditos"):
+            client.extract({}, "LATAM")
+        assert session.post.call_count == 1

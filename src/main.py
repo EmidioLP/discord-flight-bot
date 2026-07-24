@@ -21,6 +21,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from typing import Callable
 
 from . import compare, storage
 from .storage import DBConnection
@@ -52,18 +53,37 @@ def run_check(settings: Settings, conn: DBConnection) -> int:
         notify_error(settings.discord_webhook_url, "ORCAMENTO", exc, settings.route_label)
         return 0
 
+    # Teto por execucao, alem do teto mensal. Sem ele, uma sequencia de erros
+    # 5xx com retry poderia consumir varias checagens do mes numa tacada so.
+    usado_no_inicio = tracker.used_this_month()
+
+    def budget_guard() -> bool:
+        if not tracker.can_spend(settings.credits_per_request):
+            logger.warning("Orcamento do mes esgotado.")
+            return False
+        gasto_neste_run = tracker.used_this_month() - usado_no_inicio
+        if gasto_neste_run + settings.credits_per_request > settings.max_credits_per_run:
+            logger.warning(
+                "Teto desta execucao atingido (%s de %s creditos); abortando o resto.",
+                gasto_neste_run,
+                settings.max_credits_per_run,
+            )
+            return False
+        return True
+
     client = GeckoClient(
         api_key=settings.geckoapi_key,
         timeout=settings.http_timeout_seconds,
         max_retries=settings.http_max_retries,
+        retry_delay_seconds=settings.http_retry_delay_seconds,
         credit_hook=lambda label: tracker.record(settings.credits_per_request, label),
-        budget_guard=lambda: tracker.can_spend(settings.credits_per_request),
+        budget_guard=budget_guard,
     )
 
     successes = 0
     for airline in AIRLINES:
         try:
-            successes += _check_airline(settings, conn, tracker, client, airline)
+            successes += _check_airline(settings, conn, tracker, client, airline, budget_guard)
         except Exception:  # noqa: BLE001 - uma companhia nao pode derrubar a outra
             logger.exception("Erro inesperado ao processar %s", airline)
 
@@ -82,12 +102,13 @@ def _check_airline(
     tracker: CreditsTracker,
     client: GeckoClient,
     airline: str,
+    budget_guard: Callable[[], bool],
 ) -> int:
     """Processa uma companhia. Devolve 1 em sucesso, 0 em falha."""
     logger.info("--- %s ---", airline)
 
-    if not tracker.can_spend(settings.credits_per_request):
-        logger.warning("Sem creditos para consultar %s; pulando.", airline)
+    if not budget_guard():
+        logger.warning("Sem creditos disponiveis para consultar %s; pulando.", airline)
         return 0
 
     try:

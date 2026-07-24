@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Callable, Iterable
 
 import requests
@@ -173,17 +174,21 @@ class GeckoClient:
         self,
         api_key: str,
         timeout: int = 120,
-        max_retries: int = 2,
+        max_retries: int = 1,
+        retry_delay_seconds: int = 60,
         credit_hook: Callable[[str], None] | None = None,
         budget_guard: Callable[[], bool] | None = None,
         session: requests.Session | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
+        self.retry_delay_seconds = max(0, retry_delay_seconds)
         self.credit_hook = credit_hook or (lambda _label: None)
         self.budget_guard = budget_guard or (lambda: True)
         self.session = session or requests.Session()
+        self._sleep = sleep_fn or time.sleep
 
     def extract(self, body: dict[str, Any], label: str) -> dict[str, Any]:
         """Executa POST /v1/extract e devolve o JSON, com retry em falha transitoria."""
@@ -193,14 +198,30 @@ class GeckoClient:
             "Accept": "application/json",
         }
         last_error: Exception | None = None
+        total_tentativas = self.max_retries + 1
 
-        for attempt in range(1, self.max_retries + 2):
+        for attempt in range(1, total_tentativas + 1):
             if not self.budget_guard():
                 raise GeckoAPIError(
                     f"Sem creditos para a tentativa {attempt} de {label}; abortando."
                 )
 
-            logger.info("GeckoAPI | %s | tentativa %s | body=%s", label, attempt, body)
+            if attempt > 1 and self.retry_delay_seconds:
+                # A GeckoAPI raspa o site da companhia. Um UPSTREAM_TIMEOUT diz
+                # que o site estava lento; repetir no segundo seguinte encontra
+                # a mesma lentidao e queima mais 5 creditos. A pausa e barata:
+                # o job do Actions tem 6h de teto.
+                logger.info(
+                    "GeckoAPI | %s | aguardando %ss antes da tentativa %s",
+                    label,
+                    self.retry_delay_seconds,
+                    attempt,
+                )
+                self._sleep(self.retry_delay_seconds)
+
+            logger.info(
+                "GeckoAPI | %s | tentativa %s/%s | body=%s", label, attempt, total_tentativas, body
+            )
             try:
                 response = self.session.post(
                     API_URL, json=body, headers=headers, timeout=self.timeout

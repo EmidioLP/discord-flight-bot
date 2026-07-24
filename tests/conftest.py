@@ -11,6 +11,18 @@ from src import storage
 from src.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _sem_sleep_real(monkeypatch):
+    """Nenhum teste pode dormir de verdade.
+
+    O retry do GeckoClient pausa 60s por padrao (retry imediato apos um
+    UPSTREAM_TIMEOUT so queima credito). Sem este patch, um teste de retry
+    trava a suite por minutos. Quem quiser inspecionar as pausas injeta o
+    proprio `sleep_fn`.
+    """
+    monkeypatch.setattr("src.fetch_prices.time.sleep", lambda _s: None)
+
+
 @pytest.fixture()
 def conn() -> sqlite3.Connection:
     """Banco em memoria com o schema real aplicado."""
@@ -40,6 +52,8 @@ def settings(tmp_path) -> Settings:
         turso_auth_token="",
         http_timeout_seconds=10,
         http_max_retries=1,
+        http_retry_delay_seconds=0,
+        max_credits_per_run=20,
         log_level="WARNING",
     )
 
