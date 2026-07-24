@@ -211,7 +211,7 @@ O modo `schedule` exige um processo vivo. Para agendar pelo sistema:
 **Windows (Agendador de Tarefas)** — a cada 2 dias, as 9h:
 
 ```powershell
-$a = New-ScheduledTaskAction -Execute "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot\.venv\Scripts\python.exe" -Argument "-m src.main once" -WorkingDirectory "C:\Users\emidi\OneDrive\Documentos\voos-project\discord-flight-bot"; $t = New-ScheduledTaskTrigger -Daily -DaysInterval 2 -At 9am; $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun; Register-ScheduledTask -TaskName "MonitorVoos" -Action $a -Trigger $t -Settings $s
+$proj = "C:\caminho\para\discord-flight-bot"; $a = New-ScheduledTaskAction -Execute "$proj\.venv\Scripts\python.exe" -Argument "-m src.main once" -WorkingDirectory "$proj"; $t = New-ScheduledTaskTrigger -Daily -DaysInterval 2 -At 9am; $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun; Register-ScheduledTask -TaskName "MonitorVoos" -Action $a -Trigger $t -Settings $s
 ```
 
 `-WorkingDirectory` importa: `python -m src.main` so funciona a partir da raiz
