@@ -187,12 +187,17 @@ def send_embed(
     payload = {"username": "Monitor de Voos", "embeds": [embed]}
     try:
         response = http.post(webhook_url, json=payload, timeout=timeout)
-    except requests.Timeout as exc:
-        raise DiscordError(f"Timeout de {timeout}s ao enviar para o Discord") from exc
+    except requests.Timeout:
+        # `from None` de proposito: a exception do requests costuma carregar a
+        # URL completa do webhook, e essa URL E o segredo. Encadear (from exc)
+        # ou interpolar {exc} faria o token vazar no log do Actions via
+        # logger.exception - e em repo publico esse log e visivel a qualquer um.
+        raise DiscordError(f"Timeout de {timeout}s ao enviar para o Discord") from None
     except requests.RequestException as exc:
-        raise DiscordError(f"Erro de conexao com o Discord: {exc}") from exc
+        raise DiscordError(f"Erro de conexao com o Discord ({type(exc).__name__})") from None
 
     if response.status_code >= 400:
+        # response.text e o corpo de erro do Discord (nao contem o token da URL).
         raise DiscordError(f"Discord respondeu HTTP {response.status_code}: {response.text[:300]}")
 
     logger.info("Embed enviado ao Discord | %s", embed.get("title"))
