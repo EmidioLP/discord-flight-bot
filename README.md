@@ -368,3 +368,9 @@ erro 5xx.
 
 `python -m src.main status` mostra a qualquer momento quantas checagens completas
 ainda cabem no mes.
+
+---
+
+## Licenca
+
+[MIT](LICENSE). Use, modifique e distribua livremente, mantendo o aviso de copyright.
