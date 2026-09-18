@@ -1,5 +1,14 @@
 # Discord Flight Bot
 
+> ## Projeto descontinuado (setembro/2026)
+>
+> Os creditos da GeckoAPI **nao renovaram**: o saldo chegou a 0 e ficou la. Sem
+> credito nao ha consulta de preco, entao os agendamentos foram removidos do
+> workflow e o bot nao roda mais sozinho.
+>
+> O codigo continua completo e funcional — o que falta e saldo na API. Para
+> reativar, veja [Reativar o projeto](#reativar-o-projeto) no fim deste arquivo.
+
 Monitor de precos de voos **BEL -> NAT** (ida 27/12/2026, volta 05/01/2027),
 com notificacao por webhook do Discord a cada checagem.
 
@@ -8,12 +17,12 @@ A busca e feita no **KAYAK** via [GeckoAPI](https://geckoapi.com.br)
 metabusca cobre todas as companhias e agencias, e a mensagem informa de qual
 companhia e a viagem mais barata encontrada e quem a vende.
 
-Cada request custa **5 creditos** e o plano free da 100/mes, entao o bot roda
-**a cada 2 dias, entre 05:00 e 09:00** de Belem, e tem um contador que impede o
-estouro mesmo se o scheduler disparar fora de hora.
+Cada request custa **5 creditos** e o plano free da 100/mes, entao o bot rodava
+**a cada 2 dias, entre 05:00 e 09:00** de Belem, com um contador que impedia o
+estouro mesmo se o scheduler disparasse fora de hora.
 
-Na **vespera do reset de creditos** ele abre uma segunda janela, das 20:00 as
-23:00, e gasta o saldo que sobrou antes de virar po.
+Na **vespera do reset de creditos** ele abria uma segunda janela, das 20:00 as
+23:00, para gastar o saldo que sobrou antes de virar po.
 
 ---
 
@@ -132,17 +141,21 @@ Em **Settings > Secrets and variables > Actions**, crie os quatro:
 ### 4. Testar
 
 Aba **Actions > Checagem de precos > Run workflow**. Gasta 5 creditos e deve
-resultar em um embed no Discord. A partir dai o cron assume: dias impares, as
-9h de Belem.
+resultar em um embed no Discord.
 
 ### Janelas de execucao
+
+> **Os dois crons foram removidos** do `check.yml` na descontinuacao; hoje o
+> workflow so tem `workflow_dispatch` (disparo manual). A tabela abaixo descreve
+> como era, e as linhas de cron estao comentadas no proprio arquivo para quem
+> quiser restaurar.
 
 | Janela | Quando | Cron (UTC) | O que faz |
 | --- | --- | --- | --- |
 | Manha | dias impares, 05:00-09:00 | `0 9 */2 * *` | checagem regular |
 | Noite | so na vespera do reset, 20:00-23:00 | `0 23,0,1,2 * * *` | gasta o saldo restante |
 
-O cron da noite dispara **todo dia**, mas o codigo so executa se for a vespera
+O cron da noite disparava **todo dia**, mas o codigo so executa se for a vespera
 do reset, se o horario local estiver na janela e se houver saldo. Nos outros
 dias ele sai calado com codigo 0 - nao gasta credito, nao manda mensagem e nao
 deixa o Actions vermelho.
@@ -176,6 +189,11 @@ Reset de creditos: dia 1 (suposicao)
 
 Ate observar o primeiro reset, a suposicao vale. Se ela estiver errada, o custo
 e s perder a rajada da noite naquele mes - a checagem da manha nao e afetada.
+
+**O que aconteceu na pratica:** o reset nunca veio. O saldo chegou a 0 e ficou
+la, sem renovar no dia 1 nem em nenhum outro. Foi o motivo da descontinuacao.
+A suposicao de "cota mensal que renova" era justamente isso: uma suposicao, que
+a doc nunca confirmou.
 
 ### Detalhes do workflow
 
@@ -353,21 +371,42 @@ parse e defensivo e a resposta bruta fica salva para reprocessamento.
 
 | Acao | Creditos |
 | --- | --- |
-| 1 request (uma companhia) | 5 |
-| 1 checagem completa | 10 |
+| 1 checagem (1 request ao KAYAK) | 5 |
 | Orcamento mensal (plano free) | 100 |
-| Checagens por mes (intervalo de 4 dias) | 8 no maximo = 80 creditos |
+| Checagens por mes (intervalo de 2 dias) | 16 no maximo = 80 creditos |
 | Folga para retries | 20 creditos (4 tentativas extras) |
 
-O intervalo de 3 dias, que parecia caber certinho em 100 creditos, na verdade
-estourava: num mes de 31 dias o cron `*/3` dispara nos dias 1, 4, 7, ..., 31 —
-**11 checagens = 110 creditos**. O contador barraria a ultima, mas voce perderia
-uma leitura em vez de escolher onde economizar. Com 4 dias sao no maximo 8
-disparos (dias 1, 5, 9, ..., 29), e sobram 20 creditos para absorver retries de
-erro 5xx.
+A conta mudou junto com a fonte de dados. Consultando LATAM e Azul em separado
+eram 2 requests = 10 creditos por checagem, o que limitava o intervalo a 4 dias.
+Com o KAYAK (metabusca, 1 request cobre todas as companhias) a checagem caiu
+para 5 creditos e o intervalo pode ser de 2 dias, sem estourar os 100.
 
-`python -m src.main status` mostra a qualquer momento quantas checagens completas
-ainda cabem no mes.
+Cuidado com o calendario ao mexer no cron: `*/3` num mes de 31 dias dispara nos
+dias 1, 4, 7, ..., 31 — **11 checagens**, e nao 10. O contador barraria a ultima,
+mas voce perderia uma leitura em vez de escolher onde economizar.
+
+`python -m src.main status` mostra a qualquer momento quantas checagens ainda
+cabem no mes.
+
+---
+
+## Reativar o projeto
+
+O codigo esta inteiro e testado; o unico impedimento e saldo na GeckoAPI.
+Tendo credito de novo:
+
+1. **Restaurar os agendamentos** em `.github/workflows/check.yml` —
+   descomente as duas linhas de cron que ficaram no comentario do bloco `on:`.
+2. **Reabilitar o workflow** em Actions, se ele tiver sido desabilitado pela
+   interface (aba Actions > Checagem de precos > `···` > Enable workflow).
+3. **Conferir os secrets** (`GECKOAPI_KEY`, `DISCORD_WEBHOOK_URL`,
+   `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) — o token do Turso e o webhook
+   podem ter expirado ou sido revogados no meio tempo.
+4. **Testar sem gastar credito** com o workflow *Testar conexao com o banco*, e
+   so depois disparar *Checagem de precos* com `mode: manual`.
+
+Antes de tudo isso, vale confirmar em `python -m src.main credits` que o saldo
+realmente voltou — o comando consulta a GeckoAPI e nao consome credito.
 
 ---
 
